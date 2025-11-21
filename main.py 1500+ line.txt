@@ -1,0 +1,1516 @@
+import time
+import json
+import re
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
+import sys
+import MetaTrader5 as mt5
+from typing import Dict, List, Any
+import schedule
+import threading
+import csv
+import pandas as pd
+from colorama import init, Fore, Style
+init(autoreset=True)
+from core.mt5_connector import MT5Connector
+from core.risk_manager import RiskManager
+from core.strategy import TradingStrategy
+from core.trade_executor import TradeExecutor
+from filters.news_filter import NewsFilter
+from filters.session_filter import SessionFilter
+from filters.spread_filter import SpreadFilter
+from notifications.telegram_bot import TelegramBot
+from utils.logger import Logger
+from utils.backtester import Backtester
+from utils.settings_manager import SettingsManager
+from utils.profit_target import ProfitTargetManager
+from utils.market_regime import MarketRegimeDetector
+load_dotenv()
+import warnings
+from pandas.errors import SettingWithCopyWarning
+warnings.simplefilter(action="ignore", category=SettingWithCopyWarning)
+BOX = {
+    'H': '═', 'V': '║', 'TL': '╔', 'TR': '╗', 'BL': '╚', 'BR': '╝',
+    'ML': '╠', 'MR': '╣', 'MT': '╦', 'MB': '╩', 'C': '╬',
+}
+WIDTH = 80
+C_TITLE = Fore.YELLOW + Style.BRIGHT
+C_HEADER = Fore.CYAN + Style.BRIGHT
+C_BORDER = Fore.MAGENTA
+C_TEXT = Fore.WHITE
+C_LABEL = Fore.CYAN
+C_VALUE = Fore.WHITE + Style.BRIGHT
+C_GREEN = Fore.GREEN
+C_RED = Fore.RED
+C_YELLOW = Fore.YELLOW
+C_DIM = Style.DIM + Fore.WHITE
+C_RESET = Style.RESET_ALL
+C_CYAN = Fore.CYAN
+C_WHITE = Fore.WHITE
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+def strip_ansi(text: str) -> str:
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+def print_box_line(text_left: str = "", text_right: str = "", width: int = WIDTH, color: str = C_TEXT):
+    content_width = width - 4
+   
+    left_clean = strip_ansi(text_left)
+    right_clean = strip_ansi(text_right)
+   
+    left_len = len(left_clean)
+    right_len = len(right_clean)
+   
+    if text_right:
+        padding_spaces = content_width - left_len - right_len
+        if padding_spaces < 1:
+            padding_spaces = 1
+       
+        content = f"{text_left}{' ' * padding_spaces}{text_right}"
+    else:
+        padding_spaces = content_width - left_len
+       
+        if color and not any(escape in text_left for escape in ['\x1b', '\033']):
+            content = f"{color}{text_left}{' ' * padding_spaces}{C_RESET}"
+        else:
+            content = f"{text_left}{' ' * padding_spaces}"
+   
+    print(f"{C_BORDER}{BOX['V']}{C_RESET} {content} {C_BORDER}{BOX['V']}{C_RESET}")
+def print_box_separator(width: int = WIDTH, type: str = 'middle'):
+    if type == 'top':
+        print(f"{C_BORDER}{BOX['TL']}{BOX['H'] * (width - 2)}{BOX['TR']}{C_RESET}")
+    elif type == 'bottom':
+        print(f"{C_BORDER}{BOX['BL']}{BOX['H'] * (width - 2)}{BOX['BR']}{C_RESET}")
+    elif type == 'middle':
+        print(f"{C_BORDER}{BOX['ML']}{BOX['H'] * (width - 2)}{BOX['MR']}{C_RESET}")
+    elif type == 'sub':
+        print(f"{C_BORDER}{BOX['V']}{C_DIM}{'─' * (width - 2)}{C_BORDER}{BOX['V']}{C_RESET}")
+def get_progress_bar(percent: float, width: int = 20) -> str:
+    if percent < 0: percent = 0
+    if percent > 100: percent = 100
+    filled_width = int(width * percent / 100)
+    empty_width = width - filled_width
+    return f"[{C_GREEN}{'█' * filled_width}{C_DIM}{'░' * empty_width}{C_RESET}]"
+def run_health_check(sm: SettingsManager, mt5c: MT5Connector):
+    clear_screen()
+    print(C_HEADER + "=" * WIDTH)
+    print(C_HEADER + f"{'🏥 BOT HEALTH CHECK & DIAGNOSIS':^{WIDTH}}")
+    print(C_HEADER + "=" * WIDTH + C_RESET)
+    print("\nDiagnosing...\n")
+    time.sleep(1)
+    connected = mt5c.connect()
+    scores = {
+        "connection": {"score": 0, "max": 20, "issues": [], "recs": []},
+        "risk": {"score": 0, "max": 25, "issues": [], "recs": []},
+        "safety": {"score": 0, "max": 25, "issues": [], "recs": []},
+        "filters": {"score": 0, "max": 15, "issues": [], "recs": []},
+        "strategy": {"score": 0, "max": 15, "issues": [], "recs": []},
+    }
+    print(C_HEADER + "[1/5] Checking MT5 Connection...")
+    if connected:
+        acc = mt5c.get_account_info()
+        if acc:
+            acc_type = acc.get('account_type', 'Unknown')
+            leverage = acc.get('leverage', 0)
+            balance = acc.get('balance', 0.0)
+            print(C_GREEN + f" ✓ Connected to {acc_type} account. Balance: ${balance:.2f}")
+            scores['connection']['score'] = 20
+            if balance < 100 and acc_type == 'Real':
+                    print(C_YELLOW + " ⚠️ Warning: Low balance for Real account!")
+                    scores['connection']['recs'].append("Use a CENT account or deposit more.")
+        else:
+            print(C_RED + " ❌ Error: Could not get account info.")
+            scores['connection']['issues'].append("MT5 login OK, but failed to get account info.")
+    else:
+        print(C_RED + " ❌ CRITICAL: MT5 not connected!")
+        scores['connection']['issues'].append("MT5 disconnected. Check your .env file.")
+    print(C_HEADER + "\n[2/5] Checking Risk Settings...")
+    default_lot = sm.get_lot_size()
+    risk_pct = sm.get_risk_per_trade()
+    if default_lot > 0.0:
+        print(C_RED + f" ❌ DANGER: Fixed Lot Mode Active ({default_lot} lot)")
+        scores['risk']['issues'].append("Fixed Lot Mode")
+        scores['risk']['recs'].append("Set 'Default Lot Size' to 0.0 to enable Auto-Lot (Risk-Based).")
+    else:
+        print(C_GREEN + " ✓ Auto-Lot Mode Active (Smart Risk)")
+        scores['risk']['score'] += 15
+    if risk_pct > 2.0:
+         print(C_YELLOW + f" ⚠️ High Risk Per Trade ({risk_pct}%)")
+         scores['risk']['recs'].append("Consider lowering risk to 1.0% or 2.0%.")
+    else:
+         print(C_GREEN + f" ✓ Safe Risk Per Trade ({risk_pct}%)")
+         scores['risk']['score'] += 10
+    print(C_HEADER + "\n[3/5] Checking Safety Fuses...")
+    margin_filter = sm.get_margin_filter_enabled()
+    min_margin = sm.get_min_margin_level()
+    if not margin_filter:
+        print(C_RED + " ❌ DANGER: Margin Filter (Fuse) is OFF!")
+        scores['safety']['issues'].append("Margin Filter OFF")
+        scores['safety']['recs'].append("TURN ON Margin Filter immediately to prevent Margin Call.")
+    else:
+        print(C_GREEN + f" ✓ Margin Filter ON (Min: {min_margin}%)")
+        scores['safety']['score'] += 15
+        if min_margin < 300:
+            print(C_YELLOW + " ⚠️ Warning: Min Margin Level is too low (<300%).")
+            scores['safety']['recs'].append("Increase Min Margin Level to at least 300-500%.")
+        else:
+            scores['safety']['score'] += 10
+    print(C_HEADER + "\n[4/5] Checking External Filters...")
+    news_filter = sm.get_news_filter_enabled()
+    spread_filter = sm.get_max_spread()
+    if not news_filter:
+        print(C_YELLOW + " ⚠️ News Filter is OFF. Trading during NFP/CPI is risky.")
+        scores['filters']['recs'].append("Enable News Filter if you want to avoid extreme volatility.")
+    else:
+        print(C_GREEN + " ✓ News Filter ON")
+        scores['filters']['score'] += 10
+    if spread_filter > 40:
+         print(C_YELLOW + f" ⚠️ Loose Default Spread Filter ({spread_filter} pts).")
+         scores['filters']['recs'].append("Tighten default max spread to 30-35.")
+    else:
+         print(C_GREEN + f" ✓ Tight Default Spread Filter ({spread_filter} pts)")
+         scores['filters']['score'] += 5
+    print(C_HEADER + "\n[5/5] Checking Strategy Brain...")
+    mode = sm.get_trading_mode()
+    if mode == "AUTO":
+        print(C_GREEN + " ✓ Smart AUTO v2.0 Active (Best Choice)")
+        scores['strategy']['score'] += 15
+    else:
+        print(C_CYAN + f" ℹ️ Manual Mode: {mode}")
+        scores['strategy']['score'] += 10
+        scores['strategy']['recs'].append("If unsure, use AUTO mode for dynamic strategy.")
+    print(C_BORDER + "\n" + "=" * WIDTH)
+    print(C_TITLE + f"{'📋 DIAGNOSIS SUMMARY':^{WIDTH}}")
+    print(C_BORDER + "=" * WIDTH + C_RESET)
+    total_score = sum(s['score'] for s in scores.values())
+    max_score = sum(s['max'] for s in scores.values())
+    score_pct = (total_score / max_score) * 100 if max_score > 0 else 0
+    if score_pct >= 95: rank, rank_color = "S (PRO)", C_GREEN
+    elif score_pct >= 80: rank, rank_color = "A (SAFE)", C_GREEN
+    elif score_pct >= 60: rank, rank_color = "B (OKAY)", C_YELLOW
+    elif score_pct >= 40: rank, rank_color = "C (RISKY)", C_YELLOW
+    else: rank, rank_color = "F (DANGEROUS)", C_RED
+    print(f"\n Overall Health Score: {rank_color}{Style.BRIGHT}{score_pct:.0f}/100{C_RESET} | Rank: {rank_color}{Style.BRIGHT}{rank}{C_RESET}")
+    for cat, data in scores.items():
+        cat_pct = (data['score'] / data['max']) * 100 if data['max'] > 0 else 0
+        bar = get_progress_bar(cat_pct, 20)
+        print(f" {cat.capitalize():<12}: {bar} {data['score']}/{data['max']} pts")
+    all_issues = [issue for data in scores.values() for issue in data['issues']]
+    all_recs = [rec for data in scores.values() for rec in data['recs']]
+    if all_issues:
+        print(C_RED + "\n CRITICAL ISSUES:")
+        for i, issue in enumerate(all_issues, 1):
+            print(f" {i}. {issue}")
+    if all_recs:
+        print(C_YELLOW + "\n RECOMMENDATIONS:")
+        for i, rec in enumerate(all_recs, 1):
+            print(f" {i}. {rec}")
+    if not all_issues and score_pct >= 95:
+        print(C_GREEN + "\n ✅ PERFECT HEALTH! Bot is ready to go.")
+    print(C_BORDER + "=" * WIDTH)
+    input(C_YELLOW + "\nPress Enter to return to menu...")
+def job_weekly_report():
+    print(C_CYAN + f"[{datetime.now()}] Running Weekly Performance Report...")
+    try:
+        today = datetime.now()
+        start_date = today - timedelta(days=7)
+        trades_file = 'logs/trades.csv'
+        exits_file = 'logs/trade_exits.csv'
+        if not os.path.exists(trades_file):
+            print(C_YELLOW + "Weekly Report: File logs/trades.csv not found.")
+            return
+       
+        try:
+            trades_df = pd.read_csv(trades_file)
+            if not os.path.exists(exits_file):
+                exits_df = pd.DataFrame(columns=['ticket'])
+            else:
+                exits_df = pd.read_csv(exits_file)
+        except pd.errors.EmptyDataError:
+            trades_df = pd.DataFrame()
+            exits_df = pd.DataFrame(columns=['ticket'])
+        if trades_df.empty:
+            raise Exception("No trade entries found")
+        exits_df['ticket'] = exits_df['ticket'].astype(str)
+        trades_df['ticket'] = trades_df['ticket'].astype(str)
+       
+        combined_df = pd.merge(trades_df, exits_df, on='ticket', how='left')
+       
+        combined_df['profit'] = combined_df['profit'].fillna(0)
+        combined_df['status'] = combined_df['profit'].apply(lambda x: 'CLOSED' if pd.notna(x) else 'OPEN')
+       
+        combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'])
+       
+        trades_past_week = combined_df[
+            (combined_df['timestamp'] >= start_date) &
+            (combined_df['timestamp'] <= today) &
+            (combined_df['status'] == 'CLOSED')
+        ]
+       
+        sm = SettingsManager()
+        if trades_past_week.empty:
+            msg = "📊 *WEEKLY REPORT*\n━━━━━━━━━━━━━━━━━━━\n\nNo trades were closed in the last 7 days."
+            TelegramBot(sm).send_message(msg)
+            print(C_GREEN + "✓ Weekly Report: No trades, notification sent.")
+            return
+        total_trades = len(trades_past_week)
+        profits = trades_past_week['profit'].astype(float)
+        wins = profits[profits > 0]
+        losses = profits[profits <= 0]
+        total_pnl = profits.sum()
+        win_count = len(wins)
+        loss_count = len(losses)
+        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+        best_trade = wins.max() if not wins.empty else 0.0
+        worst_trade = losses.min() if not losses.empty else 0.0
+        sum_wins = wins.sum()
+        sum_losses = abs(losses.sum())
+        profit_factor = sum_wins / sum_losses if sum_losses > 0 else (999.0 if sum_wins > 0 else 0.0)
+        emoji = "🎉" if total_pnl > 0 else "😔"
+        msg = f"""
+{emoji} *WEEKLY PERFORMANCE REPORT*
+_({start_date.strftime('%d %b')} - {today.strftime('%d %b %Y')})_
+━━━━━━━━━━━━━━━━━━━
+*Performance:*
+• *Total P/L:* `${total_pnl:+.2f}`
+• *Win Rate:* `{win_rate:.1f}%` ({win_count}W / {loss_count}L)
+• *Total Trades:* `{total_trades}`
+*Trade Analytics:*
+• *Best Trade:* `${best_trade:+.2f}`
+• *Worst Trade:* `${worst_trade:+.2f}`
+• *Profit Factor:* `{profit_factor:.2f}`
+"""
+        TelegramBot(sm).send_message(msg)
+        print(C_GREEN + "✓ Weekly report successfully sent to Telegram.")
+    except Exception as e:
+        print(C_RED + f"❌ Failed to run Weekly Report: {e}")
+        try:
+            sm = SettingsManager()
+            TelegramBot(sm).notify_error(f"Failed to generate Weekly Report: {e}")
+        except:
+            pass
+def job_news_preload():
+    print(C_CYAN + f"[{datetime.now()}] Running Weekly News Pre-load...")
+    try:
+        sm = SettingsManager()
+        NewsFilter(sm).update_news_cache()
+        print(C_GREEN + "✓ News cache successfully updated for next week.")
+        TelegramBot(sm).send_message("📰 *Bot Update*\nNews cache for next week has been downloaded successfully. Bot is ready for Monday!")
+    except Exception as e:
+        print(C_RED + f"❌ Failed to run News Pre-load: {e}")
+        try:
+            sm = SettingsManager()
+            TelegramBot(sm).notify_error(f"Failed to update News Cache: {e}")
+        except:
+            pass
+def run_scheduler_thread():
+    print(C_CYAN + f"[{datetime.now()}] Scheduler thread (Weekly Assistant) started...")
+    schedule.every().saturday.at("09:00").do(job_weekly_report)
+    schedule.every().sunday.at("20:00").do(job_news_preload)
+    while True:
+        try:
+            schedule.run_pending()
+            time.sleep(60)
+        except Exception as e:
+            print(C_RED + f"Scheduler thread error: {e}")
+            time.sleep(60)
+def quick_settings_menu(sm: SettingsManager):
+    while True:
+        clear_screen()
+       
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}QUICK SETTINGS EDITOR", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+       
+        status_icon_news = f"{C_RED}OFF" if not sm.get_news_filter_enabled() else f"{C_GREEN}ON"
+        status_icon_session = f"{C_GREEN}ON" if sm.get_session_filter_enabled() else f"{C_RED}OFF"
+        status_icon_margin = f"{C_GREEN}ON" if sm.get_margin_filter_enabled() else f"{C_RED}OFF"
+       
+        lot_display = "AUTO" if sm.get_lot_size() == 0.0 else f"{sm.get_lot_size():.2f}"
+       
+        print_box_line(f"{C_LABEL}TRADING", f"{C_LABEL}RISK MANAGEMENT", width=WIDTH)
+        print_box_separator(WIDTH, 'sub')
+        print_box_line(f"Symbol: {C_VALUE}{sm.get_symbol():<12}", f"Per Trade: {C_VALUE}{sm.get_risk_per_trade():.1f}%", width=WIDTH)
+        print_box_line(f"Timeframe: {C_VALUE}{sm.get_timeframe():<12}", f"Max Total: {C_VALUE}{sm.get_max_total_risk():.1f}%", width=WIDTH)
+        print_box_line(f"Lot Size: {C_VALUE}{lot_display:<12}", f"Margin: {status_icon_margin}", width=WIDTH)
+        print_box_line(f"Max Pos: {C_VALUE}{sm.get_max_positions():<12}", f"Min Margin: {C_VALUE}{sm.get_min_margin_level():.0f}%", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_LABEL}FILTERS & SAFETY", width=WIDTH)
+        print_box_separator(WIDTH, 'sub')
+        print_box_line(f"News Filter: {status_icon_news}", f"Spread Filter: {C_VALUE}{sm.get_max_spread()} pts", width=WIDTH)
+        print_box_line(f"Session Filter: {status_icon_session}", f"Min ATR: {C_VALUE}{sm.get_min_atr()}", width=WIDTH)
+        sessions_display = ', '.join(sm.get_allowed_sessions())
+        print_box_line(f"Allowed Sessions: {C_VALUE}{sessions_display}", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_LABEL}STRATEGY: {C_YELLOW}{sm.get_trading_mode()}", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_HEADER}QUICK ACTIONS", width=WIDTH)
+        print_box_separator(WIDTH, 'sub')
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Edit Trading Settings", f" {C_VALUE}[2]{C_TEXT} Edit Risk Management", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Edit Filters & Safety", f" {C_VALUE}[4]{C_TEXT} Change Strategy Mode", width=WIDTH)
+        print_box_line(f" {C_VALUE}[5]{C_TEXT} View Full Details", f" {C_VALUE}[0]{C_TEXT} Back to Main Menu", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+        choice = input(C_YELLOW + "\nEnter your choice [0-5]: ").strip()
+        if choice == '0':
+            break
+        elif choice == '1':
+            edit_trading_settings_submenu(sm)
+        elif choice == '2':
+            edit_risk_settings_submenu(sm)
+        elif choice == '3':
+            edit_filters_submenu(sm)
+        elif choice == '4':
+            edit_strategy_submenu(sm)
+        elif choice == '5':
+            view_full_details(sm)
+        else:
+            print(C_RED + "\n❌ Invalid choice")
+            time.sleep(1)
+def edit_trading_settings_submenu(sm: SettingsManager):
+    while True:
+        clear_screen()
+       
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}EDIT TRADING SETTINGS", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+       
+        lot_display = "AUTO (Risk-Based)" if sm.get_lot_size() == 0.0 else f"{sm.get_lot_size():.2f} lot (Fixed)"
+       
+        print_box_line(f"{C_LABEL}Symbol:", f"{C_VALUE}{sm.get_symbol()}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Timeframe:", f"{C_VALUE}{sm.get_timeframe()}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Lot Size:", f"{C_VALUE}{lot_display}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Max Positions:", f"{C_VALUE}{sm.get_max_positions()}", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Change Symbol", width=WIDTH)
+        print_box_line(f" {C_VALUE}[2]{C_TEXT} Change Timeframe", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Change Lot Size", f"{C_DIM}(0 = Auto)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[4]{C_TEXT} Change Max Positions", width=WIDTH)
+        print_box_line(f" {C_VALUE}[0]{C_TEXT} Back", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+       
+        choice = input(C_YELLOW + "\nEnter your choice [0-4]: ").strip()
+       
+        if choice == '0':
+            break
+        elif choice == '1':
+            new_symbol = input("\nEnter new symbol (e.g. XAUUSD, EURUSD): ").strip()
+            if new_symbol and sm.set_symbol(new_symbol):
+                print(C_GREEN + f"✓ Symbol changed to: {new_symbol}")
+            else:
+                print(C_RED + "❌ Failed to update symbol")
+            time.sleep(1.5)
+        elif choice == '2':
+            print("\nAvailable: M1, M5, M15, M30, H1, H4, D1")
+            new_tf = input("Enter new timeframe: ").strip()
+            if new_tf and sm.set_timeframe(new_tf):
+                print(C_GREEN + f"✓ Timeframe changed to: {new_tf}")
+            else:
+                print(C_RED + "❌ Invalid timeframe")
+            time.sleep(1.5)
+        elif choice == '3':
+            try:
+                new_lot = float(input("\nEnter new lot size (0 for Auto-Lot): ").strip())
+                if sm.set_lot_size(new_lot):
+                    print(C_GREEN + f"✓ Lot size changed to: {new_lot}")
+                else:
+                    print(C_RED + "❌ Invalid lot size")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        elif choice == '4':
+            try:
+                new_max = int(input("\nEnter new max positions: ").strip())
+                if sm.set_max_positions(new_max):
+                    print(C_GREEN + f"✓ Max positions changed to: {new_max}")
+                else:
+                    print(C_RED + "❌ Invalid value")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        else:
+            print(C_RED + "❌ Invalid choice")
+            time.sleep(1)
+def edit_risk_settings_submenu(sm: SettingsManager):
+    while True:
+        clear_screen()
+       
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}EDIT RISK MANAGEMENT", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+       
+        margin_status = f"{C_GREEN}ON" if sm.get_margin_filter_enabled() else f"{C_RED}OFF"
+       
+        print_box_line(f"{C_LABEL}Risk per Trade:", f"{C_VALUE}{sm.get_risk_per_trade():.1f}%", width=WIDTH)
+        print_box_line(f"{C_LABEL}Max Total Risk:", f"{C_VALUE}{sm.get_max_total_risk():.1f}%", width=WIDTH)
+        print_box_line(f"{C_LABEL}Margin Filter:", f"{margin_status}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Min Margin Level:", f"{C_VALUE}{sm.get_min_margin_level():.0f}%", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Change Risk per Trade", width=WIDTH)
+        print_box_line(f" {C_VALUE}[2]{C_TEXT} Change Max Total Risk", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Toggle Margin Filter", f"{C_DIM}(Safety Fuse)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[4]{C_TEXT} Set Min Margin Level", width=WIDTH)
+        print_box_line(f" {C_VALUE}[0]{C_TEXT} Back", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+       
+        choice = input(C_YELLOW + "\nEnter your choice [0-4]: ").strip()
+       
+        if choice == '0':
+            break
+        elif choice == '1':
+            try:
+                new_risk = float(input("\nEnter new risk per trade (0.1-10.0%): ").strip())
+                if sm.set_risk_per_trade(new_risk):
+                    print(C_GREEN + f"✓ Risk per trade changed to: {new_risk}%")
+                else:
+                    print(C_RED + "❌ Invalid value (must be 0.1-10.0)")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        elif choice == '2':
+            try:
+                new_risk = float(input("\nEnter new max total risk (1-20%): ").strip())
+                if sm.set_max_total_risk(new_risk):
+                    print(C_GREEN + f"✓ Max total risk changed to: {new_risk}%")
+                else:
+                    print(C_RED + "❌ Invalid value (must be 1-20)")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        elif choice == '3':
+            if sm.toggle_margin_filter():
+                status = "ON" if sm.get_margin_filter_enabled() else "OFF"
+                print(C_GREEN + f"✓ Margin Filter is now: {status}")
+            else:
+                print(C_RED + "❌ Failed to toggle")
+            time.sleep(1.5)
+        elif choice == '4':
+            try:
+                new_level = float(input("\nEnter new min margin level (e.g. 500): ").strip())
+                if sm.set_min_margin_level(new_level):
+                    print(C_GREEN + f"✓ Min Margin Level changed to: {new_level}%")
+                else:
+                    print(C_RED + "❌ Invalid value")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        else:
+            print(C_RED + "❌ Invalid choice")
+            time.sleep(1)
+def edit_filters_submenu(sm: SettingsManager):
+    while True:
+        clear_screen()
+       
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}EDIT FILTERS & SAFETY", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+       
+        news_status = f"{C_GREEN}ON" if sm.get_news_filter_enabled() else f"{C_RED}OFF"
+        session_status = f"{C_GREEN}ON" if sm.get_session_filter_enabled() else f"{C_RED}OFF"
+        sessions_display = ', '.join(sm.get_allowed_sessions())
+       
+        print_box_line(f"{C_LABEL}News Filter:", f"{news_status}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Session Filter:", f"{session_status}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Max Spread:", f"{C_VALUE}{sm.get_max_spread()} pts", width=WIDTH)
+        print_box_line(f"{C_LABEL}Min ATR:", f"{C_VALUE}{sm.get_min_atr()}", width=WIDTH)
+        print_box_line(f"{C_LABEL}Allowed Sessions:", f"{C_VALUE}{sessions_display}", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Toggle News Filter", width=WIDTH)
+        print_box_line(f" {C_VALUE}[2]{C_TEXT} Toggle Session Filter", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Change Max Spread", width=WIDTH)
+        print_box_line(f" {C_VALUE}[4]{C_TEXT} Change Min ATR", width=WIDTH)
+        print_box_line(f" {C_VALUE}[5]{C_TEXT} Manage Allowed Sessions", width=WIDTH)
+        print_box_line(f" {C_VALUE}[0]{C_TEXT} Back", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+       
+        choice = input(C_YELLOW + "\nEnter your choice [0-5]: ").strip()
+       
+        if choice == '0':
+            break
+        elif choice == '1':
+            if sm.toggle_news_filter():
+                status = "ON" if sm.get_news_filter_enabled() else "OFF"
+                print(C_GREEN + f"✓ News Filter is now: {status}")
+            else:
+                print(C_RED + "❌ Failed to toggle")
+            time.sleep(1.5)
+        elif choice == '2':
+            if sm.toggle_session_filter():
+                status = "ON" if sm.get_session_filter_enabled() else "OFF"
+                print(C_GREEN + f"✓ Session Filter is now: {status}")
+            else:
+                print(C_RED + "❌ Failed to toggle")
+            time.sleep(1.5)
+        elif choice == '3':
+            try:
+                new_spread = int(input("\nEnter new max spread (points): ").strip())
+                if sm.set_max_spread(new_spread):
+                    print(C_GREEN + f"✓ Max spread changed to: {new_spread} points")
+                else:
+                    print(C_RED + "❌ Invalid value")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        elif choice == '4':
+            try:
+                new_atr = float(input("\nEnter new min ATR (e.g. 0.2): ").strip())
+                if sm.set_min_atr(new_atr):
+                    print(C_GREEN + f"✓ Min ATR changed to: {new_atr}")
+                else:
+                    print(C_RED + "❌ Invalid value")
+            except:
+                print(C_RED + "❌ Invalid input")
+            time.sleep(1.5)
+        elif choice == '5':
+            current = sm.get_allowed_sessions()
+            print(f"\nCurrent: {', '.join(current)}")
+            print("Available: asian, london, us, sydney")
+            new_sessions_str = input("Enter sessions (comma-separated): ").strip()
+            if new_sessions_str:
+                new_sessions = [s.strip().lower() for s in new_sessions_str.split(',')]
+                if sm.set_allowed_sessions(new_sessions):
+                    print(C_GREEN + f"✓ Sessions changed to: {', '.join(new_sessions)}")
+                else:
+                    print(C_RED + "❌ Failed to update")
+            time.sleep(1.5)
+        else:
+            print(C_RED + "❌ Invalid choice")
+            time.sleep(1)
+def edit_strategy_submenu(sm: SettingsManager):
+    clear_screen()
+   
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}CHANGE TRADING MODE", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+   
+    current_mode = sm.get_trading_mode()
+    print_box_line(f"{C_LABEL}Current Mode:", f"{C_YELLOW}{current_mode}", width=WIDTH)
+   
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f" {C_VALUE}[1]{C_TEXT} AUTO", f"{C_DIM}(Smart v2.0 - Adaptive)", width=WIDTH)
+    print_box_line(f" {C_VALUE}[2]{C_TEXT} SNIPER_ONLY", f"{C_DIM}(Always reversal)", width=WIDTH)
+    print_box_line(f" {C_VALUE}[3]{C_TEXT} TREND_ONLY", f"{C_DIM}(Always momentum)", width=WIDTH)
+    print_box_line(f" {C_VALUE}[4]{C_TEXT} PULLBACK_ONLY", f"{C_DIM}(Trend + Pullback)", width=WIDTH)
+    print_box_line(f" {C_VALUE}[5]{C_TEXT} BREAKOUT_ONLY", f"{C_DIM}(Breakout trading)", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+   
+    mode_choice = input(C_YELLOW + "\nChoose [1-5]: ").strip()
+   
+    mode_map = {'1': 'AUTO', '2': 'SNIPER_ONLY', '3': 'TREND_ONLY', '4': 'PULLBACK_ONLY', '5': 'BREAKOUT_ONLY'}
+   
+    if mode_choice in mode_map:
+        if sm.set_trading_mode(mode_map[mode_choice]):
+            print(C_GREEN + f"\n✓ Trading mode changed to: {mode_map[mode_choice]}")
+        else:
+            print(C_RED + "\n❌ Failed to update")
+    else:
+        print(C_RED + "\n❌ Invalid choice")
+   
+    time.sleep(1.5)
+def view_full_details(sm: SettingsManager):
+    clear_screen()
+   
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}FULL CONFIGURATION DETAILS", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+   
+    summary_lines = sm.get_summary().split('\n')
+    for line in summary_lines:
+        if line.strip():
+            print_box_line(line, width=WIDTH)
+   
+    print_box_separator(WIDTH, 'bottom')
+    input(C_YELLOW + "\nPress Enter to continue...")
+def auto_detect_symbols_menu(sm: SettingsManager, mt5c: MT5Connector):
+    clear_screen()
+   
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}SYMBOL AUTO-DETECT", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line("Connecting to MT5...", width=WIDTH, color=C_YELLOW)
+    if not mt5c.connect():
+        print_box_line("Failed to connect to MT5", width=WIDTH, color=C_RED)
+        print_box_separator(WIDTH, 'bottom')
+        input("\nPress Enter to continue...")
+        return
+    print_box_line("Connected. Scanning symbols...", width=WIDTH, color=C_GREEN)
+    print_box_separator(WIDTH, 'middle')
+    all_symbols = mt5.symbols_get()
+    if not all_symbols:
+        print_box_line("Failed to get symbols from broker", width=WIDTH, color=C_RED)
+        print_box_separator(WIDTH, 'bottom')
+        mt5c.disconnect()
+        input("\nPress Enter to continue...")
+        return
+    gold_symbols: List[Dict[str, Any]] = []
+    forex_symbols: List[Dict[str, Any]] = []
+    for s in all_symbols:
+        name = s.name.upper()
+        if "XAU" in name or "GOLD" in name:
+            info = mt5c.get_symbol_info(s.name)
+            if info and info.get('trade_mode') != mt5.SYMBOL_TRADE_MODE_DISABLED:
+                gold_symbols.append({
+                    'name': s.name, 'description': s.description,
+                    'contract_size': info.get('trade_contract_size', 0),
+                    'spread': info.get('spread', 0)
+                })
+    forex_keywords = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCAD', 'AUDUSD', 'NZDUSD', 'USDCHF']
+    for s in all_symbols:
+        name = s.name.upper()
+        if name in forex_keywords:
+            info = mt5c.get_symbol_info(s.name)
+            if info and info.get('trade_mode') != mt5.SYMBOL_TRADE_MODE_DISABLED:
+                forex_symbols.append({
+                    'name': s.name, 'description': s.description,
+                    'spread': info.get('spread', 0)
+                })
+    mt5c.disconnect()
+    all_detected = gold_symbols + forex_symbols
+    print_box_line(f"{C_HEADER}DETECTED SYMBOLS ({len(all_detected)} found)", width=WIDTH)
+    print_box_separator(WIDTH, 'sub')
+    if not all_detected:
+        print_box_line("No tradable Gold or Major Forex pairs found.", width=WIDTH, color=C_RED)
+    else:
+        for i, sym in enumerate(all_detected, 1):
+            if "XAU" in sym['name']:
+                desc_short = sym['description'][:25] if len(sym['description']) > 25 else sym['description']
+                print_box_line(f" {C_VALUE}[{i}]{C_RESET} {C_YELLOW}{sym['name']:<12}{C_RESET}", f"{C_DIM}Contract: {sym['contract_size']} | Spread: {sym['spread']}", width=WIDTH)
+            else:
+                print_box_line(f" {C_VALUE}[{i}]{C_RESET} {sym['name']:<12}", f"{C_DIM}Spread: {sym['spread']}", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f" {C_VALUE}[0]{C_TEXT} Skip / Back to Main Menu", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+   
+    select = input(C_YELLOW + "\nEnter number to set as active symbol [0 to skip]: ").strip()
+    if select.isdigit():
+        idx = int(select)
+        if 1 <= idx <= len(all_detected):
+            selected_symbol = all_detected[idx - 1]['name']
+            if sm.set_symbol(selected_symbol):
+                print(C_GREEN + f"\n✓ Active symbol changed to: {selected_symbol}")
+            else:
+                print(C_RED + "\n❌ Failed to update symbol")
+        elif idx != 0:
+            print(C_RED + "\n❌ Invalid number.")
+    input("\nPress Enter to continue...")
+   
+def position_management_menu(sm: SettingsManager, mt5c: MT5Connector):
+    clear_screen()
+   
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}POSITION MANAGEMENT", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line("Connecting to MT5...", width=WIDTH, color=C_YELLOW)
+    if not mt5c.connect():
+        print_box_line("Failed to connect to MT5", width=WIDTH, color=C_RED)
+        print_box_separator(WIDTH, 'bottom')
+        input("\nPress Enter to continue...")
+        return
+    symbol = sm.get_symbol()
+    positions = mt5c.get_positions(symbol)
+    if not positions or len(positions) == 0:
+        print_box_line(f"No open positions for {symbol}", width=WIDTH, color=C_GREEN)
+        print_box_separator(WIDTH, 'bottom')
+        mt5c.disconnect()
+        input("\nPress Enter to continue...")
+        return
+    print_box_line(f"{C_HEADER}OPEN POSITIONS ({len(positions)}) - {symbol}", width=WIDTH)
+    print_box_separator(WIDTH, 'sub')
+    symbol_info = mt5c.get_symbol_info(symbol)
+    for i, pos in enumerate(positions, 1):
+        pos_type = pos['type']
+        current_price = symbol_info['bid'] if pos_type == 'BUY' else symbol_info['ask']
+       
+        profit_col = C_GREEN if pos['profit'] > 0 else C_RED if pos['profit'] < 0 else C_DIM
+        type_col = C_GREEN if pos_type == 'BUY' else C_RED
+       
+        print_box_line(
+            f" {C_VALUE}[{i}]{C_RESET} #{pos['ticket']} {type_col}{pos_type}{C_RESET} {pos['volume']:.2f} lot",
+            f"{profit_col}${pos['profit']:+.2f}{C_RESET}",
+            width=WIDTH
+        )
+        print_box_line(
+            f" Entry: {pos['price_open']:.5f} | Current: {current_price:.5f}",
+            f"SL: {pos['sl']:.5f} TP: {pos['tp']:.5f}",
+            width=WIDTH,
+            color=C_DIM
+        )
+    total_profit = sum(p['profit'] for p in positions)
+    total_col = C_GREEN if total_profit > 0 else C_RED if total_profit < 0 else C_DIM
+   
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f"{C_LABEL}Total P/L:", f"{total_col}{Style.BRIGHT}${total_profit:+.2f}{C_RESET}", width=WIDTH)
+   
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f"{C_HEADER}ACTIONS", width=WIDTH)
+    print_box_separator(WIDTH, 'sub')
+    print_box_line(f" {C_VALUE}[C]{C_TEXT} Close All Positions", width=WIDTH)
+    print_box_line(f" {C_VALUE}[1-{len(positions)}]{C_TEXT} Close Selected Position (enter number)", width=WIDTH)
+    print_box_line(f" {C_VALUE}[0]{C_TEXT} Back to Main Menu", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+    choice = input(C_YELLOW + "\nEnter your choice: ").strip().upper()
+    if choice == 'C':
+        confirm = input(C_YELLOW + f"\nClose ALL {len(positions)} positions? [y/N]: ").strip().lower()
+        if confirm == 'y':
+            closed_count = 0
+            for pos in positions:
+                if mt5c.close_position(pos['ticket']):
+                    closed_count += 1
+                    print(C_GREEN + f"✓ Closed #{pos['ticket']} | Profit: ${pos['profit']:+.2f}")
+                else:
+                    print(C_RED + f"❌ Failed to close #{pos['ticket']}")
+            print(C_GREEN + f"\n✓ Closed {closed_count}/{len(positions)} positions")
+        else:
+            print(C_RED + "❌ Cancelled")
+    elif choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(positions):
+            pos = positions[idx - 1]
+            confirm = input(C_YELLOW + f"\nClose position #{pos['ticket']}? [y/N]: ").strip().lower()
+            if confirm == 'y':
+                if mt5c.close_position(pos['ticket']):
+                    print(C_GREEN + f"✓ Closed #{pos['ticket']} | Profit: ${pos['profit']:+.2f}")
+                else:
+                    print(C_RED + "❌ Failed to close position")
+            else:
+                print(C_RED + "❌ Cancelled")
+        else:
+            print(C_RED + "❌ Invalid position number")
+    mt5c.disconnect()
+    input("\nPress Enter to continue...")
+   
+def quick_backtest_menu(sm: SettingsManager, mt5c: MT5Connector):
+    clear_screen()
+   
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}QUICK BACKTEST", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f"{C_HEADER}BACKTEST OPTIONS", width=WIDTH)
+    print_box_separator(WIDTH, 'sub')
+    print_box_line(f" {C_VALUE}[1]{C_TEXT} Last 7 Days", width=WIDTH)
+    print_box_line(f" {C_VALUE}[2]{C_TEXT} Last 14 Days", width=WIDTH)
+    print_box_line(f" {C_VALUE}[3]{C_TEXT} Last 30 Days", width=WIDTH)
+    print_box_line(f" {C_VALUE}[4]{C_TEXT} Last 60 Days", width=WIDTH)
+    print_box_line(f" {C_VALUE}[5]{C_TEXT} Custom Date Range", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(f" {C_VALUE}[0]{C_TEXT} Back to Main Menu", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+    choice = input(C_YELLOW + "\nEnter your choice [0-5]: ").strip()
+    if choice == '0':
+        return
+    today = datetime.now()
+    if choice == '1':
+        start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+    elif choice == '2':
+        start_date = (today - timedelta(days=14)).strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+    elif choice == '3':
+        start_date = (today - timedelta(days=30)).strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+    elif choice == '4':
+        start_date = (today - timedelta(days=60)).strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+    elif choice == '5':
+        print("\nEnter custom date range:")
+        start_date = input("Start date (YYYY-MM-DD): ").strip()
+        end_date = input("End date (YYYY-MM-DD): ").strip()
+        try:
+            datetime.strptime(start_date, '%Y-%m-%d')
+            datetime.strptime(end_date, '%Y-%m-%d')
+        except:
+            print(Fore.RED + "❌ Invalid date format")
+            input("\nPress Enter to continue...")
+            return
+    else:
+        print(Fore.RED + "❌ Invalid choice")
+        input("\nPress Enter to continue...")
+        return
+    print(f"\n{C_LABEL}Backtest Period: {C_VALUE}{start_date} {C_TEXT}to {C_VALUE}{end_date}")
+    confirm = input(C_YELLOW + "Proceed? [Y/n]: ").strip().lower()
+    if confirm == 'n':
+        return
+    sm.set_backtest_period(start_date, end_date)
+    print_box_separator(WIDTH, 'top')
+    print_box_line("Starting backtest...", width=WIDTH, color=C_YELLOW)
+    print_box_separator(WIDTH, 'bottom')
+    print()
+    run_backtest_mode(sm, mt5c, silent=False)
+def profit_target_menu(sm: SettingsManager):
+    ptm = ProfitTargetManager(sm)
+    while True:
+        clear_screen()
+       
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}PROFIT TARGET MANAGER", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        ptm.load_settings()
+        ptm.load_daily_stats()
+        print_box_line(f"{C_HEADER}CURRENT STATUS", width=WIDTH)
+        print_box_separator(WIDTH, 'sub')
+       
+        summary_lines = ptm.get_summary_text().split('\n')
+        for line in summary_lines:
+            if line.strip():
+                print_box_line(line, width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_HEADER}ACTIONS", width=WIDTH)
+        print_box_separator(WIDTH, 'sub')
+       
+        status_text = "Turn OFF" if ptm.enabled else "Turn ON"
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Toggle Profit Target", f"{C_DIM}({status_text})", width=WIDTH)
+        print_box_line(f" {C_VALUE}[2]{C_TEXT} Set Daily Target", f"{C_DIM}(Current: ${ptm.daily_target_usd:.2f})", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Set Action on Reach", f"{C_DIM}(Current: {ptm.action_when_reached})", width=WIDTH)
+        print_box_line(f" {C_YELLOW}[4]{C_TEXT} Manual Reset Today's Stats", width=WIDTH)
+       
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f" {C_VALUE}[0]{C_TEXT} Back to Main Menu", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+        choice = input(C_YELLOW + "\nEnter your choice [0-4]: ").strip()
+        if choice == '0':
+            break
+        elif choice == '1':
+            success, msg = ptm.toggle_enabled()
+            if success:
+                print(C_GREEN + f"\n✓ {msg}")
+            else:
+                print(C_RED + f"\n❌ {msg}")
+            time.sleep(1.5)
+        elif choice == '2':
+            new_target = input("\nEnter new daily target (e.g. 50.0): ").strip()
+            success, msg = ptm.update_target(new_target)
+            if success:
+                print(C_GREEN + f"\n✓ {msg}")
+            else:
+                print(C_RED + f"\n❌ {msg}")
+            time.sleep(1.5)
+        elif choice == '3':
+            print("\nAvailable actions: STOP, REDUCE_LOT, CONTINUE")
+            new_action = input("Enter new action: ").strip()
+            success, msg = ptm.update_action(new_action)
+            if success:
+                print(C_GREEN + f"\n✓ {msg}")
+            else:
+                print(C_RED + f"\n❌ {msg}")
+            time.sleep(1.5)
+        elif choice == '4':
+            confirm = input(C_YELLOW + "\nReset today's profit/trades to 0? [y/N]: ").strip().lower()
+            if confirm == 'y':
+                ptm.manual_reset()
+                print(C_GREEN + "\n✓ Daily stats have been reset.")
+            else:
+                print(C_RED + "\n❌ Action cancelled.")
+            time.sleep(1.5)
+        else:
+            print(C_RED + "\n❌ Invalid choice")
+            time.sleep(1)
+class GoldScalperBot:
+    def __init__(self, sm: SettingsManager, mt5_connector: MT5Connector):
+        print(Style.BRIGHT + "=" * 50)
+        print(Style.BRIGHT + "GOLD SCALPER BOT - Initializing...")
+        print(Style.BRIGHT + "=" * 50)
+        self.sm = sm
+        self.settings = sm.settings
+        self.mt5 = mt5_connector
+        self.risk_manager = RiskManager(self.sm)
+        self.strategy = TradingStrategy(self.sm)
+       
+        self.news_filter = NewsFilter(self.sm)
+        self.session_filter = SessionFilter(self.sm)
+        self.spread_filter = SpreadFilter(self.sm)
+       
+        self.telegram = TelegramBot(self.sm)
+        self.logger = Logger()
+        self.ptm = ProfitTargetManager(self.sm)
+       
+        self.trading_config = self.settings.get('trading', {})
+        self.symbol = self.trading_config.get('symbol', 'XAUUSD')
+        self.timeframe = self.trading_config.get('timeframe', 'M1')
+        self.executor = TradeExecutor(self.mt5, self.risk_manager, self.strategy, self.sm, self.ptm)
+        self.regime_detector = MarketRegimeDetector(self.sm, symbol=self.symbol)
+       
+        self.current_regime = "UNKNOWN"
+        self.regime_details: Dict[str, Any] = {}
+        self.last_regime = "UNKNOWN"
+        self.is_running = False
+        self._base_default_lot = float(self.trading_config.get('default_lot', 0.0))
+        self.last_signal_details = {
+            'signal_type': 'NEUTRAL',
+            'confidence': 0,
+            'details': {}
+        }
+        self.loop_count = 0
+        print(C_GREEN + Style.BRIGHT + f"✓ Components initialized (Symbol: {self.symbol})")
+    def start(self):
+        if not self.mt5.connect():
+            return False
+        print(f"Checking symbol '{self.symbol}' (from settings.json)...")
+        symbol_info = self.mt5.get_symbol_info(self.symbol)
+        if symbol_info is not None:
+            if symbol_info.get('trade_mode') == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                print(C_RED + f"❌ FATAL ERROR: Symbol '{self.symbol}' is found but disabled (not tradable).")
+                return False
+            print(C_GREEN + f"✓ Symbol '{self.symbol}' OK (Tradable).")
+        else:
+            print(C_YELLOW + f"⚠️ WARNING: Symbol '{self.symbol}' (from settings.json) not found.")
+            print(" Searching for alternative XAU/GOLD symbols...")
+            all_symbols = mt5.symbols_get()
+            found_symbol = None
+            if not all_symbols:
+                print(C_RED + "❌ FATAL ERROR: Failed to retrieve symbol list from broker.")
+                return False
+            for s in all_symbols:
+                name = s.name.upper()
+                if "XAU" in name or "GOLD" in name:
+                    info = self.mt5.get_symbol_info(s.name)
+                    if info is None or info.get('trade_mode') == mt5.SYMBOL_TRADE_MODE_DISABLED:
+                        continue
+                    if info.get('trade_contract_size') == 100:
+                        print(C_GREEN + f"✓ Found! Bot will automatically switch to: '{s.name}'")
+                        found_symbol = s.name
+                        break
+            if found_symbol:
+                self.symbol = found_symbol
+                self.executor.symbol = found_symbol
+                self.regime_detector = MarketRegimeDetector(self.sm, symbol=self.symbol)
+                print(f" (Ensure this symbol '{self.symbol}' matches your backtest.)")
+                time.sleep(3)
+            else:
+                print(C_RED + f"❌ FATAL ERROR: Failed to find a tradable XAU/GOLD symbol")
+                print(" with Contract Size 100.")
+                print(" Please fix 'symbol' in settings.json manually.")
+                return False
+        print(C_HEADER + "\nCalibrating market regime detector...")
+        try:
+            calibration_data = self.mt5.get_price_data(
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                bars=500
+            )
+            if calibration_data is not None and len(calibration_data) >= 200:
+                self.regime_detector.calibrate_thresholds(calibration_data)
+            else:
+                print(C_YELLOW + f"⚠️ Warning: Not enough data for calibration (got {len(calibration_data) if calibration_data is not None else 0} bars). Using default thresholds.")
+                self.logger.log_warning(f"Regime calibration failed: Not enough data (got {len(calibration_data) if calibration_data is not None else 0} bars)")
+        except Exception as e:
+            print(C_RED + f"❌ Error during regime calibration: {e}. Using default thresholds.")
+            self.logger.log_error(f"Regime calibration error: {e}")
+        account_info = self.mt5.get_account_info()
+        if account_info:
+            self.telegram.notify_bot_status(
+                'STARTED',
+                f"Symbol: {self.symbol}\nTimeframe: {self.timeframe}\nBalance: ${account_info.get('balance', 0.0):.2f}"
+            )
+        self.logger.log_info(f"Bot started successfully with symbol {self.symbol}")
+        self.is_running = True
+        return True
+    def stop(self):
+        self.is_running = False
+        self.telegram.notify_bot_status('STOPPED', 'Bot stopped by user')
+        self.logger.log_info("Bot stopped")
+        self.mt5.disconnect()
+        clear_screen()
+        print(Style.BRIGHT + C_YELLOW + "\n" + "=" * 50)
+        print(Style.BRIGHT + C_YELLOW + "Bot stopped successfully")
+        print(Style.BRIGHT + C_YELLOW + "=" * 50)
+    def update_dashboard(self):
+        clear_screen()
+        summary = self.executor.get_trading_summary()
+        regime_summary = self.regime_detector.get_regime_summary()
+        self.ptm.load_daily_stats()
+        ptm_progress = self.ptm.get_progress()
+        sm = self.sm
+        current_mode = sm.get_trading_mode()
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        title_text = " B I F R O S T G O L D B O T by @Albiansyah "
+        print_box_separator(width=WIDTH, type='top')
+        print_box_line(f"{C_TITLE}{title_text:^{WIDTH-4}}{C_RESET}", f"{C_DIM}{now_str}{C_RESET}", width=WIDTH)
+        print_box_separator(width=WIDTH, type='middle')
+        print_box_line(f"{C_HEADER}ACCOUNT & RISK", width=WIDTH)
+        print_box_separator(width=WIDTH, type='sub')
+        if summary:
+            account = summary['account']
+            risk = summary['risk_stats']
+            balance_col = C_GREEN if account.get('balance', 0) >= 100000 else C_WHITE
+            equity_col = C_GREEN if account.get('equity', 0) >= account.get('balance', 0) else C_RED
+            pl_col = C_GREEN if account.get('profit', 0) > 0 else C_RED if account.get('profit', 0) < 0 else C_DIM
+            risk_col = C_YELLOW if risk.get('risk_pct', 0) > 1.0 else C_GREEN
+            print_box_line(f"{C_LABEL}Account: {C_VALUE}{account.get('login', 'N/A')}{C_TEXT} ({account.get('server')})", f"{C_LABEL}Leverage: {C_VALUE}1:{account.get('leverage', 'N/A')}", width=WIDTH)
+            print_box_line(f"{C_LABEL}Balance: {balance_col}{Style.BRIGHT}${account.get('balance', 0):,.2f}", f"{C_LABEL}Equity: {equity_col}{Style.BRIGHT}${account.get('equity', 0):,.2f}", width=WIDTH)
+            print_box_line(f"{C_LABEL}Open P/L: {pl_col}{Style.BRIGHT}${account.get('profit', 0):+,.2f}", f"{C_LABEL}Open Risk: {risk_col}${risk.get('total_risk', 0):.2f} ({risk.get('risk_pct', 0):.2f}%)", width=WIDTH)
+            print_box_line(f"{C_LABEL}Positions: {C_VALUE}{risk.get('total_positions', 0)} {C_DIM}(Buy: {risk.get('buy_positions', 0)}, Sell: {risk.get('sell_positions', 0)})", f"{C_LABEL}Margin Lvl: {C_VALUE}{account.get('margin_level', 0):.2f}%", width=WIDTH)
+        else:
+            print_box_line("Fetching account data...", width=WIDTH, color=C_YELLOW)
+        print_box_separator(width=WIDTH, type='middle')
+        print_box_line(f"{C_HEADER}MARKET REGIME & PRICE ({self.symbol} | {self.timeframe})", width=WIDTH)
+        print_box_separator(width=WIDTH, type='sub')
+        print_box_line(f"{C_LABEL}Current: {C_VALUE}{regime_summary}", width=WIDTH)
+        if self.regime_details:
+            if self.current_regime == "TRENDING":
+                direction = self.regime_details.get('direction', 'N/A')
+                strength = self.regime_details.get('strength', 'N/A')
+                print_box_line(f"{C_LABEL}Direction: {C_VALUE}{direction} ({strength})", width=WIDTH)
+            elif self.current_regime == "RANGING":
+                support = self.regime_details.get('support', 'N/A')
+                resistance = self.regime_details.get('resistance', 'N/A')
+                print_box_line(f"{C_LABEL}Range: {C_VALUE}{support} - {resistance}", width=WIDTH)
+            elif self.current_regime == "VOLATILE":
+                atr_ratio = self.regime_details.get('atr_ratio', 'N/A')
+                print_box_line(f"{C_LABEL}ATR Ratio: {C_VALUE}{atr_ratio}x (⚠️ Reduce exposure)", width=WIDTH)
+            elif self.current_regime == "BREAKOUT":
+                direction = self.regime_details.get('direction', 'N/A')
+                print_box_line(f"{C_LABEL}Direction: {C_VALUE}{direction} (ADX: {self.regime_details.get('adx', 'N/A')})", width=WIDTH)
+            recommendation = self.regime_detector.get_strategy_recommendation(
+                self.current_regime, self.regime_details
+            )
+            print_box_line(f"{C_LABEL}Suggested: {C_YELLOW}{recommendation.get('suggested_mode', 'N/A')} (Lot: {recommendation.get('lot_multiplier', 1.0)}x)", width=WIDTH)
+        if summary and summary.get('symbol_info'):
+            info = summary['symbol_info']
+            bid = info.get('bid', 0.0)
+            ask = info.get('ask', 0.0)
+            spread = info.get('spread', 0)
+            spread_col = C_YELLOW if spread > 35 else C_GREEN
+            print_box_separator(width=WIDTH, type='sub')
+            print_box_line(f"{C_LABEL}BID: {C_RED}{bid:<.5f}{C_RESET} | {C_LABEL}ASK: {C_GREEN}{ask:<.5f}{C_RESET} | {C_LABEL}SPREAD: {spread_col}{spread} pts", width=WIDTH)
+        else:
+            print_box_line("Fetching price data...", width=WIDTH, color=C_YELLOW)
+        print_box_separator(width=WIDTH, type='middle')
+        print_box_line(f"{C_HEADER}BOT STATUS & DAILY TARGET", width=WIDTH)
+        print_box_separator(width=WIDTH, type='sub')
+        filters = {'news_filter': self.news_filter, 'session_filter': self.session_filter, 'spread_filter': self.spread_filter}
+        can_trade, reason_or_session = self.executor.can_trade(filters)
+        print_box_line(f"{C_LABEL}Strategy: {C_YELLOW}{current_mode}", width=WIDTH)
+        spinner_chars = ['-', '\\', '|', '/']
+        spinner = spinner_chars[self.loop_count % len(spinner_chars)]
+        if not can_trade:
+            print_box_line(f"{C_LABEL}Status: {C_RED + Style.BRIGHT}⏸️ PAUSED ({reason_or_session})", width=WIDTH)
+        else:
+            mode_display = f"MANUAL ({current_mode})"
+            if current_mode == "AUTO":
+                if self.current_regime == "UNKNOWN":
+                    mode_display = "AUTO (Waiting Regime...)"
+                else:
+                    mode_display = f"AUTO ({self.current_regime})"
+            print_box_line(f"{C_LABEL}Status: {C_GREEN + Style.BRIGHT}✅ ACTIVE (Mode: {mode_display}) [{spinner}]", width=WIDTH)
+        last_signal = self.last_signal_details['signal_type']
+        last_conf = self.last_signal_details['confidence']
+        last_mode = self.last_signal_details.get('details', {}).get('strategy_mode', 'N/A')
+        min_conf = self.last_signal_details.get('details', {}).get('min_conf_used', 'N/A')
+        print_box_line(f"{C_LABEL}Last Signal: {C_VALUE}{last_signal} (Confidence: {last_conf:.1f}%) {C_DIM}(Mode: {last_mode} / Min: {min_conf})", width=WIDTH)
+        print_box_separator(width=WIDTH, type='sub')
+        if not ptm_progress['enabled']:
+            print_box_line(f"{C_LABEL}Daily Target: {C_DIM}DISABLED", width=WIDTH)
+        else:
+            pnl = ptm_progress['current']
+            target = ptm_progress['target']
+            pct = ptm_progress['progress_pct']
+            pnl_col = C_GREEN if pnl > 0 else C_RED if pnl < 0 else C_DIM
+            bar = get_progress_bar(pct, 20)
+            print_box_line(f"{C_LABEL}Daily P/L: {pnl_col}{Style.BRIGHT}${pnl:+.2f}{C_RESET} / ${target:.2f}", f"{bar} {pct:.1f}%", width=WIDTH)
+        print_box_separator(width=WIDTH, type='bottom')
+        print(C_DIM + " Press Ctrl+C to stop the bot and return to menu." + C_RESET)
+    def run(self):
+        if not self.start():
+            print(Fore.RED + "\nFailed to start bot. Press Enter to return to menu.")
+            input()
+            self.mt5.disconnect()
+            return
+        last_trade_check = 0
+        last_news_check = 0
+        try:
+            while self.is_running:
+                self.loop_count += 1
+                now = time.time()
+                self.update_dashboard()
+                if (now - last_news_check) > 3600:
+                    self.news_filter.update_news_cache()
+                    self.news_filter.clear_old_news()
+                    last_news_check = now
+                if (now - last_trade_check) > 30:
+                    self.trading_cycle()
+                    last_trade_check = now
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\nKeyboard interrupt detected... stopping bot.")
+            self.stop()
+        except Exception as e:
+            error_msg = f"Critical error in main loop: {e}"
+            print(Fore.RED + f"❌ {error_msg}")
+            self.logger.log_error(error_msg)
+            self.telegram.notify_error(error_msg)
+            self.stop()
+    def trading_cycle(self):
+        try:
+            now = time.time()
+            if not hasattr(self, 'last_regime_check'):
+                self.last_regime_check = 0
+            if (now - self.last_regime_check) > 60:
+                self.detect_and_update_regime()
+                self.last_regime_check = now
+            ok_pt, reason_pt = self.ptm.can_trade()
+            if not ok_pt:
+                print(Fore.RED + f"⛔ {reason_pt}")
+                self.logger.log_info(reason_pt)
+                self.stop()
+                return
+            mult = self.ptm.get_lot_multiplier()
+            base_lot = self._base_default_lot
+           
+            self.executor.trading_config['default_lot'] = round(base_lot * mult, 2)
+            self.risk_manager.trading['default_lot'] = round(base_lot * mult, 2)
+            filters = {'news_filter': self.news_filter, 'session_filter': self.session_filter, 'spread_filter': self.spread_filter}
+            can_trade_result = self.executor.can_trade(filters)
+            can_trade = can_trade_result[0]
+            session_or_reason = can_trade_result[1]
+            if not can_trade:
+                self.last_signal_details = {'signal_type': 'NEUTRAL', 'confidence': 0, 'details': {}}
+                return
+            session_name = session_or_reason
+            closed_by_broker = self.executor.reconcile_closed_by_broker()
+            for closed in closed_by_broker:
+                print(Fore.GREEN + f"💰 Position {closed['ticket']} reconciled (closed by SL/TP): ${closed['profit']:.2f}")
+                self.telegram.notify_exit(closed)
+                self.logger.log_trade_exit(
+                    ticket=closed['ticket'],
+                    close_price=0,
+                    profit=closed['profit'],
+                    duration='',
+                    reason=closed['reason']
+                )
+                cont, msg = self.ptm.add_trade_result(closed.get('profit', 0.0))
+                self.telegram.notify_daily_update(self.ptm.get_progress())
+                if not cont:
+                    print(Fore.RED + f"⛔ {msg}")
+                    self.logger.log_info(msg)
+                    self.stop()
+                    return
+            self.manage_positions()
+            self.check_exits(session_name)
+            self.check_entries(session_name)
+        except Exception as e:
+            error_msg = f"Error in trading cycle: {e}"
+            print(Fore.RED + f"❌ {error_msg}")
+            self.logger.log_error(error_msg)
+    def manage_positions(self):
+        try:
+            actions = self.executor.manage_positions()
+            for action in actions:
+                action_type = action['action']
+                ticket = action['ticket']
+                if action_type == 'BREAKEVEN':
+                    self.telegram.notify_breakeven(ticket, action['new_sl'])
+                    self.logger.log_info(f"Position {ticket} moved to breakeven")
+                elif action_type == 'TRAILING_STOP':
+                    self.telegram.notify_trailing_stop(ticket, action['new_sl'], 0.0)
+                elif action_type == 'SCALE_OUT':
+                    self.logger.log_info(f"Position {ticket} scaled out {action['volume']} lots")
+        except Exception as e:
+            self.logger.log_error(f"Error managing positions: {e}")
+    def check_exits(self, session_name):
+        try:
+            closed_positions = self.executor.check_exit_signals(session_name)
+            for closed in closed_positions:
+                self.telegram.notify_exit(closed)
+                self.logger.log_trade_exit(
+                    ticket=closed['ticket'],
+                    close_price=0,
+                    profit=closed['profit'],
+                    duration='',
+                    reason=closed['reason']
+                )
+                cont, msg = self.ptm.add_trade_result(closed.get('profit', 0.0))
+                self.telegram.notify_daily_update(self.ptm.get_progress())
+                if not cont:
+                    print(Fore.RED + f"⛔ {msg}")
+                    self.logger.log_info(msg)
+                    self.stop()
+                    return
+        except Exception as e:
+            self.logger.log_error(f"Error checking exits: {e}")
+    def check_entries(self, session_name):
+        try:
+            result = self.executor.check_for_new_entry(session_name)
+            if not result:
+                if self.last_signal_details['signal_type'] != 'NEUTRAL':
+                        self.last_signal_details = {
+                            'signal_type': 'NEUTRAL',
+                            'confidence': 0,
+                            'details': {}
+                        }
+                return
+            self.last_signal_details = {
+                'signal_type': result['signal_type'],
+                'confidence': result['confidence'],
+                'details': result.get('details', {})
+            }
+            action = result['action_taken']
+            if action == 'EXECUTED':
+                order_info = result['order_info']
+                signal_context = {
+                    'strategy_mode': result.get('details', {}).get('strategy_mode', 'N/A'),
+                    'confidence': result['confidence'],
+                    'session': session_name,
+                    'regime': self.current_regime,
+                    'score': result.get('details', {}).get('buy_score', 0.0) or result.get('details', {}).get('sell_score', 0.0),
+                    'min_conf': result.get('details', {}).get('min_conf_used', 0.0),
+                    'indicators': {
+                        'rsi_value': result.get('details', {}).get('signals', {}).get('rsi_value'),
+                        'macd_histogram': result.get('details', {}).get('signals', {}).get('macd_histogram'),
+                        'ma_trend': result.get('details', {}).get('signals', {}).get('ma'),
+                        'atr': result.get('details', {}).get('signals', {}).get('atr'),
+                    }
+                }
+                self.telegram.notify_entry(order_info, signal_context)
+                self.logger.log_trade_entry(order_info)
+                self.logger.log_signal(
+                    result['signal_type'],
+                    result['confidence'],
+                    result['details'],
+                    action_taken='EXECUTED',
+                    reason=f"Ticket: {order_info['ticket']}"
+                )
+            elif action in ['REJECTED', 'FAILED', 'SKIPPED']:
+                self.logger.log_signal(
+                    result.get('signal_type'),
+                    result.get('confidence', 0),
+                    result.get('details', {}),
+                    action_taken=action,
+                    reason=result.get('reason', '')
+                )
+        except Exception as e:
+            self.logger.log_error(f"Error checking entries: {e}")
+    def detect_and_update_regime(self):
+        try:
+            data = self.mt5.get_price_data(
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                bars=100
+            )
+            if data is None or len(data) < 60:
+                return
+            regime, details = self.regime_detector.detect_regime(data)
+            if regime != self.current_regime:
+                print(Style.BRIGHT + C_CYAN + f"\n🔄 REGIME CHANGE: {self.current_regime} → {regime}")
+                recommendation = self.regime_detector.get_strategy_recommendation(regime, details)
+                self.telegram.notify_regime_change(
+                    old_regime=self.current_regime,
+                    new_regime=regime,
+                    details={
+                        **details,
+                        'recommendation': recommendation
+                    }
+                )
+                self._apply_regime_adjustments(regime, recommendation, details)
+                self.last_regime = self.current_regime
+                self.current_regime = regime
+                self.regime_details = details
+            else:
+                 self.regime_details = details
+        except Exception as e:
+            error_msg = f"❌ Error detecting regime: {e}"
+            print(C_RED + error_msg)
+            self.logger.log_error(f"Error in detect_and_update_regime: {e}")
+    def _apply_regime_adjustments(self, regime: str, recommendation: Dict, details: Dict):
+        lot_multiplier = recommendation.get('lot_multiplier', 1.0)
+        adjusted_lot = self._base_default_lot * lot_multiplier
+        self.executor.trading_config['default_lot'] = round(adjusted_lot, 2)
+        print(C_GREEN + f" ✓ Lot size adjusted: {adjusted_lot:.2f} (x{lot_multiplier})")
+        self.strategy.update_dynamic_confidence(regime, details)
+        print(C_GREEN + f" ✓ Confidence thresholds updated for {regime}")
+        suggested_mode = recommendation.get('suggested_mode')
+        if suggested_mode and suggested_mode != "AUTO":
+            sm = self.sm
+            current_mode = sm.get_trading_mode()
+            if current_mode == "AUTO":
+                print(C_CYAN + f" ℹ️ Recommended mode: {suggested_mode}")
+    def send_daily_summary(self):
+        try:
+            stats = self.logger.get_today_trades()
+           
+            summary = {
+                'total_trades': stats['total_trades'],
+                'wins': stats['winning_trades'],
+                'losses': stats['losing_trades'],
+                'total_pnl': stats['total_profit'],
+                'best_trade': 0,
+                'worst_trade': 0,
+                'avg_win': 0,
+                'avg_loss': 0,
+                'max_drawdown': 0,
+                'profit_factor': 0
+            }
+            self.telegram.notify_daily_summary(summary)
+        except Exception as e:
+            print(f"Error sending daily summary: {e}")
+def run_live_bot(sm: SettingsManager, mt5c: MT5Connector):
+    scheduler_thread = threading.Thread(target=run_scheduler_thread, daemon=True)
+    scheduler_thread.start()
+    bot = GoldScalperBot(sm, mt5c)
+    bot.run()
+def run_backtest_mode(sm: SettingsManager, mt5c: MT5Connector, silent=True):
+    if not silent:
+        clear_screen()
+        print("\nInitializing Backtest Mode...")
+    if not sm.settings.get('mt5_credentials', {}).get('login'):
+        print(C_RED + "Error: MT5_LOGIN not found. Make sure settings.json is configured.")
+        input("\nPress Enter to return to menu.")
+        return
+    try:
+        backtester = Backtester(mt5c, sm)
+        backtester.run(silent=False)
+    except Exception as e:
+        print(C_RED + f"\nBacktest failed: {e}")
+    if not silent:
+        print("\nBacktest finished. Press Enter to return to menu.")
+        input()
+def show_hotkeys():
+    clear_screen()
+    print(C_TITLE + "=" * WIDTH)
+    print(C_TITLE + f"{'⌨️ HOTKEYS':^{WIDTH}}")
+    print(C_TITLE + "=" * WIDTH + C_RESET)
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_VALUE}[1-9]{C_TEXT} (on Main Menu)", f"Shortcuts to menu", width=WIDTH)
+    print_box_line(f"{C_VALUE}[H]{C_TEXT} (on Main Menu)", f"Show this Hotkey menu", width=WIDTH)
+    print_box_line(f"{C_VALUE}[0]{C_TEXT} (on Main Menu)", f"Exit Bot", width=WIDTH)
+    print_box_line(f"{C_VALUE}[Ctrl+C]{C_TEXT} (on Dashboard)", f"Stop Bot & return to Main Menu", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+    input(C_YELLOW + "\nPress Enter to return to menu...")
+def main():
+    sm = SettingsManager()
+    mt5c = MT5Connector(sm)
+   
+    while True:
+        clear_screen()
+       
+        print(C_TITLE + "=" * WIDTH)
+        print(C_TITLE + f"{'B I F R O S T G O L D B O T by @Albiansyah':^{WIDTH}}")
+        print(C_TITLE + "=" * WIDTH + C_RESET)
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_LABEL}Symbol: {C_VALUE}{sm.get_symbol()}{C_LABEL} | TF: {C_VALUE}{sm.get_timeframe()}{C_LABEL} | Mode: {C_VALUE}{sm.get_trading_mode()}", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_HEADER}TRADING:", width=WIDTH)
+        print_box_line(f" {C_VALUE}[1]{C_TEXT} Start LIVE Bot", f"{C_DIM}({sm.get_symbol()}|{sm.get_timeframe()}|{sm.get_trading_mode()})", width=WIDTH)
+        print_box_line(f" {C_VALUE}[2]{C_TEXT} Position Management", f"{C_DIM}(View/Close open trades)", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_HEADER}MANAGEMENT:", width=WIDTH)
+        print_box_line(f" {C_VALUE}[3]{C_TEXT} Quick Settings Editor", f"{C_DIM}(Change Lot, Risk, Mode, etc)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[4]{C_TEXT} Profit Target Menu", f"{C_DIM}(Set Daily P/L Target)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[5]{C_TEXT} Health Check", f"{C_DIM}(Diagnose settings & connection)", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"{C_HEADER}TOOLS:", width=WIDTH)
+        print_box_line(f" {C_VALUE}[6]{C_TEXT} Symbol Auto-Detect", f"{C_DIM}(Scan Gold & Majors)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[7]{C_TEXT} Run Backtest", f"{C_DIM}(Test {sm.bt_config.get('start_date', 'N/A')} to {sm.bt_config.get('end_date', 'N/A')})", width=WIDTH)
+        print_box_line(f" {C_VALUE}[8]{C_TEXT} Quick Backtest (Shortcuts)", f"{C_DIM}(Test 7d, 30d, custom)", width=WIDTH)
+        print_box_line(f" {C_VALUE}[9]{C_TEXT} Change Trading Mode (Legacy)", f"{C_DIM}(Old menu)", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+        print_box_line(f" {C_VALUE}[H]{C_TEXT} Show Hotkeys", f"{C_VALUE}[0]{C_TEXT} Exit Bot", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+        choice = input(C_YELLOW + "\nEnter your choice [0-9, H]: ").strip().upper()
+        if choice == '0':
+            print(C_YELLOW + "\nExiting. Goodbye!")
+            sys.exit()
+        elif choice == '1':
+            clear_screen()
+            print("\nStarting LIVE Bot...")
+            run_live_bot(sm, mt5c)
+        elif choice == '2':
+            position_management_menu(sm, mt5c)
+        elif choice == '3':
+            quick_settings_menu(sm)
+        elif choice == '4':
+            profit_target_menu(sm)
+        elif choice == '5':
+            run_health_check(sm, mt5c)
+        elif choice == '6':
+            auto_detect_symbols_menu(sm, mt5c)
+        elif choice == '7':
+            clear_screen()
+            print("\nInitializing Backtest Mode...")
+            run_backtest_mode(sm, mt5c, silent=False)
+        elif choice == '8':
+            quick_backtest_menu(sm, mt5c)
+        elif choice == '9':
+            show_mode_menu(sm)
+        elif choice == 'H':
+            show_hotkeys()
+        else:
+            print(C_RED + "\n❌ Invalid choice. Press Enter to try again.")
+            input()
+def show_mode_menu(sm: SettingsManager):
+    while True:
+        clear_screen()
+        current_mode = sm.get_trading_mode()
+        print(C_HEADER + "=" * 60)
+        print(C_HEADER + " 🔧 TRADING MODE SETTINGS 🔧")
+        print(C_HEADER + "=" * 60)
+        print(f"\n Current Mode: {C_VALUE}{current_mode}")
+        print(C_BORDER + "\n" + "-" * 60)
+        print("\n Available Modes:")
+        print(C_VALUE + " [1] AUTO Mode (Smart AUTO v2.0)")
+        print(C_TEXT + " - Automatically selects strategy (Pullback/Sniper/Trend) based on Market Regime")
+        print()
+        print(C_VALUE + " [2] SNIPER_ONLY Mode (Manual)")
+        print(C_TEXT + " - Always use SNIPER strategy (reversal)")
+        print()
+        print(C_VALUE + " [3] TREND_ONLY Mode (Manual)")
+        print(C_TEXT + " - Always use TREND strategy (momentum)")
+        print()
+        print(C_VALUE + " [4] PULLBACK_ONLY Mode (Manual)")
+        print(C_TEXT + " - Follow major trend, enter on pullback")
+        print()
+        print(C_VALUE + " [5] BREAKOUT_ONLY Mode (Manual)")
+        print(C_TEXT + " - Breakout trading (BB Squeeze + ADX)")
+        print()
+        print(C_BORDER + "-" * 60)
+        print(" [6] Back to Main Menu")
+        print()
+        choice = input(C_YELLOW + "Enter your choice [1-6]: ").strip()
+        if choice == '1':
+            if sm.set_trading_mode('AUTO'):
+                print(C_GREEN + "\n✓ Mode changed to: AUTO")
+                time.sleep(2)
+            else:
+                print(C_RED + "\n❌ Failed to save settings.")
+                time.sleep(2)
+        elif choice == '2':
+            if sm.set_trading_mode('SNIPER_ONLY'):
+                print(C_GREEN + "\n✓ Mode changed to: SNIPER_ONLY")
+                time.sleep(2)
+            else:
+                print(C_RED + "\n❌ Failed to save settings.")
+                time.sleep(2)
+        elif choice == '3':
+            if sm.set_trading_mode('TREND_ONLY'):
+                print(C_GREEN + "\n✓ Mode changed to: TREND_ONLY")
+                time.sleep(2)
+            else:
+                print(C_RED + "\n❌ Failed to save settings.")
+                time.sleep(2)
+        elif choice == '4':
+            if sm.set_trading_mode('PULLBACK_ONLY'):
+                print(C_GREEN + "\n✓ Mode changed to: PULLBACK_ONLY")
+                time.sleep(2)
+            else:
+                print(C_RED + "\n❌ Failed to save settings.")
+                time.sleep(2)
+        elif choice == '5':
+            if sm.set_trading_mode('BREAKOUT_ONLY'):
+                print(C_GREEN + "\n✓ Mode changed to: BREAKOUT_ONLY")
+                time.sleep(2)
+            else:
+                print(C_RED + "\n❌ Failed to save settings.")
+                time.sleep(2)
+        elif choice == '6':
+            break
+        else:
+            print(C_RED + "\n❌ Invalid choice. Try again.")
+            time.sleep(1)
+if __name__ == "__main__":
+    main()

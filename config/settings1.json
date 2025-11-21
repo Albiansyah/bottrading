@@ -1,0 +1,162 @@
+{
+  "mt5_credentials": {
+    "login": 98720606,
+    "password": "N_Hn3fKj",
+    "server": "MetaQuotes-Demo",
+    "path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+  },
+  "trading": {
+    "symbol": "XAUUSD",
+    "timeframe": "M5",
+    "default_lot": 0.0,
+    "max_positions": 10,
+    "max_positions_per_direction": 1,
+    "trading_mode": "AUTO"
+  },
+  "filters": {
+    "min_atr_value": 0.15,
+    "news_filter_enabled": true,
+    "news_before_minutes": 30,
+    "news_after_minutes": 30,
+    "session_filter_enabled": true,
+    "allowed_sessions": [
+      "asian"
+    ],
+    "spread_settings": {
+      "default_max": 35,
+      "session_multiplier": {
+        "asian": 1.8,
+        "london": 1.0,
+        "us": 1.0,
+        "sydney": 1.8
+      },
+      "overrides": {
+        "XAUUSD": 35
+      }
+    }
+  },
+  "indicators": {
+    "ma_period": 50,
+    "ma_long_period": 200,
+    "ma_shift": 0,
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "bb_period": 20,
+    "bb_deviation": 2.0,
+    "atr_period": 14,
+    "stoch_k_period": 14,
+    "stoch_d_period": 3,
+    "stoch_slowing": 3,
+    "stoch_overbought": 80,
+    "stoch_oversold": 20
+  },
+  "signal_requirements": {
+    "strategy_mode_override": "AUTO",
+    "min_conf_sniper": 1.8,
+    "min_conf_trend": 1.8,
+    "min_conf_pullback": 1.6,
+    "min_conf_breakout": 1.4,
+    "min_exit_score": 2.2,
+    "scoring": {
+      "sniper_setup_score": 2.0,
+      "sniper_confirm_score": 1.2,
+      "trend_ma_score": 1.8,
+      "trend_macd_score": 1.2,
+      "pullback_trend_score": 1.8,
+      "pullback_rsi_score": 1.2,
+      "breakout_signal_score": 1.8,
+      "breakout_confirm_score": 1.2,
+      "mtf_bonus_score": 2.0,
+      "mtf_penalty_pct": 0.6,
+      "mtf_pullback_penalty_pct": 0.3
+    },
+    "use_ma": true,
+    "use_rsi": true,
+    "use_macd": true,
+    "use_bb": true,
+    "use_atr": true,
+    "use_stoch": true,
+    "use_ai": false,
+    "enable_mtf": true,
+    "higher_timeframe": "H1",
+    "alignment_bonus": 1.5,
+    "bar_close_only": true,
+    "cooldown_bars": 3,
+    "one_order_per_bar": true
+  },
+  "risk_management": {
+    "max_total_risk_pct": 7.0,
+    "risk_per_trade_pct": 3.0,
+    "max_daily_risk_pct": 6.0,
+    "min_risk_reward_ratio": 1.8,
+    "atr_multiplier_sl": 1.5,
+    "atr_multiplier_tp": 3.0,
+    "daily_loss_limit_pct": 6.0,
+    "daily_profit_target_pct": 8.0,
+    "enable_margin_filter": true,
+    "min_margin_level_pct": 500,
+    "dynamic_lot_max_reduction_pct": 70,
+    "scale_out_enabled": true,
+    "scale_out_rr1": 1.5,
+    "scale_out_pct1": 50,
+    "breakeven_rr": 1.0,
+    "trailing_stop_enabled": true,
+    "trailing_stop_atr_multiplier": 2.0
+  },
+  "market_regime": {
+    "adx_trending": 22.0,
+    "adx_ranging": 18.0,
+    "atr_volatile_ratio": 1.6,
+    "bbw_ranging_pct": 0.025,
+    "breakout_momentum_pct": {
+      "default": 0.0035,
+      "XAUUSD": 0.004
+    }
+  },
+  "profit_target": {
+    "enabled": false,
+    "daily_target_usd": 40.0,
+    "action_when_reached": "pause_until_reset",
+    "reduce_lot_pct": 0.0,
+    "auto_reset_at_midnight": true
+  },
+  "emergency_kill": {
+    "enabled": true,
+    "max_drawdown_pct": 6.0
+  },
+  "weekend_shutdown": {
+    "enabled": true,
+    "shutdown_time": "23:55",
+    "shutdown_day": "Friday"
+  },
+  "auto_screenshot_interval_seconds": 15,
+  "telegram": {
+    "enabled": true,
+    "api_token": "8220864816:AAGFk53eb-yiz96h9jtmgz7WBiPAclfmZdQ",
+    "chat_id": "8437147781"
+  },
+  "notifications": {
+    "telegram_enabled": true,
+    "notify_on_entry": true,
+    "notify_on_exit": true,
+    "notify_on_error": true,
+    "notify_on_target_reached": true,
+    "notify_on_regime_change": true
+  },
+  "debug": {
+    "log_lot_calculation": true,
+    "log_mtf_filter": true,
+    "log_regime_changes": true,
+    "log_signal_scoring": false
+  },
+  "backtesting": {
+    "enabled": false,
+    "start_date": "2025-11-10",
+    "end_date": "2025-11-17",
+    "initial_balance": 12.0
+  }
+}
