@@ -29,16 +29,13 @@ class RiskManager:
         tr.setdefault('max_positions_per_direction', 3)
 
         rm = self.settings['risk_management']
-        # Basic Risk
         rm.setdefault('risk_per_trade_pct', 1.0)
         rm.setdefault('max_total_risk_pct', 5.0)
         rm.setdefault('max_single_position_risk_pct', 2.0) 
         
-        # Multipliers
         rm.setdefault('atr_multiplier_sl', 1.5)
         rm.setdefault('atr_multiplier_tp', 2.5)
         
-        # Features
         rm.setdefault('breakeven_rr', 1.0) 
         rm.setdefault('scale_out_enabled', True)
         rm.setdefault('scale_out_rr1', 1.5) 
@@ -48,7 +45,6 @@ class RiskManager:
         rm.setdefault('trailing_step_points', 50) 
         rm.setdefault('trailing_activation_rr', 1.0) 
         
-        # Safety
         rm.setdefault('enable_margin_filter', True)
         rm.setdefault('min_margin_level_pct', 500.0)
         rm.setdefault('daily_loss_limit_pct', 5.0)
@@ -59,8 +55,6 @@ class RiskManager:
 
     def reload_settings(self):
         self._load_or_default()
-
-    # --- HELPERS ---
 
     @staticmethod
     def _get_point(symbol_info: dict) -> float:
@@ -81,7 +75,6 @@ class RiskManager:
         return 100000.0 
 
     def _normalize_volume(self, vol: float, symbol_info: dict) -> float:
-        """Normalisasi volume agar sesuai step broker & presisi."""
         step = float(symbol_info.get('volume_step', 0.01))
         min_vol = float(symbol_info.get('volume_min', 0.01))
         max_vol = float(symbol_info.get('volume_max', 100.0))
@@ -94,8 +87,6 @@ class RiskManager:
         decimals = 0
         if step < 1: decimals = len(str(step).split('.')[1])
         return round(vol, decimals)
-
-    # --- CORE LOGIC ---
 
     def calculate_sl_tp(self, entry_price: float, signal_type: str, atr_value: float, symbol_info: dict, strategy_mode: str = "AUTO"):
         try:
@@ -148,51 +139,62 @@ class RiskManager:
 
     def calculate_optimal_lot_size(self, balance: float, entry_price: float, sl_price: float, symbol_info: dict) -> float:
         try:
-            # [GOD MODE - Production Ready]
-            # Jika balance di bawah $50, kita bypass hitungan risk complex.
-            # Kita paksa pakai lot terkecil. Ini wajib buat akun $10-$20.
             min_vol = float(symbol_info.get('volume_min', 0.01))
+            max_vol = float(symbol_info.get('volume_max', 100.0))
+            contract_size = self._get_contract_size(symbol_info)
+            
+            # --- FLEXIBLE AUTO RISK ENGINE ---
+            # Deteksi balance dan tentukan risk profile secara otomatis
             
             if balance < 50.0:
-                if self.log_calc: 
-                    print(f"[Risk] Low Balance (${balance}): Forcing Min Lot {min_vol} (God Mode)")
-                return min_vol
-
-            if balance <= 0: return 0.0
-
-            # --- LOGIKA AKUN STANDARD/BESAR ---
-            risk_pct = float(self.risk.get('risk_per_trade_pct', 1.0))
-            risk_amount = balance * (risk_pct / 100.0)
+                # LEVEL 1: SURVIVAL (<$50)
+                effective_risk_pct = 25.0
+                mode_label = "SURVIVAL"
             
-            contract_size = self._get_contract_size(symbol_info)
+            elif balance < 200.0:
+                # LEVEL 2: GROWTH ($50 - $200)
+                effective_risk_pct = 8.0
+                mode_label = "GROWTH"
+                
+            elif balance < 1000.0:
+                # LEVEL 3: STANDARD ($200 - $1000)
+                effective_risk_pct = 3.0
+                mode_label = "STANDARD"
+                
+            else:
+                # LEVEL 4: PRO (>$1000)
+                setting_risk = float(self.risk.get('risk_per_trade_pct', 1.0))
+                effective_risk_pct = min(setting_risk, 2.0)
+                mode_label = "PRO"
+
+            if self.log_calc:
+                print(f"[Risk] Auto-Flex: Balance ${balance:.2f} -> Mode: {mode_label} (Risk {effective_risk_pct}%)")
+
+            # Hitung Lot berdasarkan Risk Profile dinamis tadi
+            risk_amount = balance * (effective_risk_pct / 100.0)
+            
             sl_dist_price = abs(entry_price - sl_price)
-            
             point = self._get_point(symbol_info)
-            slippage_buffer = 20 * point 
-            effective_sl_dist = sl_dist_price + slippage_buffer
+            
+            # Safety SL distance (asumsi minimal 20 pip buat XAU biar hitungan lot gak meledak)
+            min_calc_sl = 200 * point if "XAU" in symbol_info.get('name', '') else 50 * point
+            effective_sl_dist = max(sl_dist_price, min_calc_sl)
 
             risk_per_lot = effective_sl_dist * contract_size
             
-            if risk_per_lot <= 0: return min_vol 
+            if risk_per_lot == 0: return min_vol
 
             raw_lot = risk_amount / risk_per_lot
-            final_lot = self._normalize_volume(raw_lot, symbol_info)
             
-            # Safety Block Logic (Hanya untuk akun > $50)
-            max_risk_usd = balance * (self.risk.get('max_single_position_risk_pct', 2.0) / 100.0)
-            real_risk_usd = final_lot * risk_per_lot
-            
-            if real_risk_usd > max_risk_usd:
-                # Check if min lot is safe enough
-                min_vol_risk = min_vol * risk_per_lot
-                if min_vol_risk <= max_risk_usd * 1.5: 
-                    if self.log_calc: print(f"[Risk] Downgrade to Min Lot {min_vol}")
-                    return min_vol
+            # Final Check: Jangan pernah di bawah min_vol kalau di mode Survival/Growth
+            if raw_lot < min_vol:
+                if balance >= 10.0: # Minimal banget $10
+                    raw_lot = min_vol
                 else:
-                    print(f"[Risk] BLOCKED: Min lot risk ${min_vol_risk:.2f} too high.")
-                    return 0.0
+                    return 0.0 # Di bawah $10 udah gak selamat
 
-            return final_lot
+            final_lot = self._normalize_volume(raw_lot, symbol_info)
+            return max(min(final_lot, max_vol), 0.0)
 
         except Exception as e:
             print(f"[Risk] Error calc lot: {e}")
@@ -209,33 +211,30 @@ class RiskManager:
     def can_open_new_position(self, balance: float, positions: list, new_position_risk: float,
                               signal_type: str, symbol_info: dict):
         try:
-            max_pos = int(self.trading.get('max_positions', 10))
-            max_dir = int(self.trading.get('max_positions_per_direction', 5))
-            max_total_risk_pct = float(self.risk.get('max_total_risk_pct', 5.0))
+            # --- FLEXIBLE AUTO POSITION LIMIT ---
+            setting_max_pos = int(self.trading.get('max_positions', 5))
             
-            total_risk_usd_limit = balance * (max_total_risk_pct / 100.0)
-
-            # 1. Count Check
-            total_pos = len(positions)
-            if total_pos >= max_pos:
-                return False, f"Max positions limit ({total_pos}/{max_pos})"
-
-            buy_count = sum(1 for p in positions if p.get('type') == 'BUY')
-            sell_count = total_pos - buy_count
-            
-            if signal_type == 'BUY' and buy_count >= max_dir:
-                return False, f"Max BUY limit ({buy_count}/{max_dir})"
-            if signal_type == 'SELL' and sell_count >= max_dir:
-                return False, f"Max SELL limit ({sell_count}/{max_dir})"
-
-            # [GOD MODE BYPASS]
-            # Kalau akun kecil (<$50), kita abaikan perhitungan Total Risk Percentage.
-            # Karena 1 posisi XAUUSD 0.01 aja resikonya bisa $3 (itu udah 30% dari $10).
-            # Kalau kita blokir disini, bot gak akan pernah trade.
+            # Override Max Positions berdasarkan Balance
             if balance < 50.0:
-                return True, "OK (Small Account Mode)"
+                real_max_pos = 1 # Cuma 1 peluru untuk survival
+            elif balance < 200.0:
+                real_max_pos = min(3, setting_max_pos) # Max 3 peluru
+            else:
+                real_max_pos = setting_max_pos # Ikuti settingan
+            
+            # Hitung posisi sekarang
+            total_pos = len(positions)
+            if total_pos >= real_max_pos:
+                return False, f"Max positions limit ({total_pos}/{real_max_pos}) for Balance ${balance:.0f}"
 
-            # 2. Total Risk Check (Hanya untuk akun > $50)
+            # Untuk akun < $100, kita bypass margin check yang ribet
+            if balance < 100.0:
+                return True, "OK (Auto-Flex Entry)"
+
+            # Untuk akun besar, cek margin filter standar
+            max_total_risk_pct = float(self.risk.get('max_total_risk_pct', 10.0))
+            total_risk_usd_limit = balance * (max_total_risk_pct / 100.0)
+            
             current_total_risk = 0.0
             for p in positions:
                 sl = p.get('sl', 0.0)
@@ -244,7 +243,7 @@ class RiskManager:
             
             projected_risk = current_total_risk + new_position_risk
             
-            if projected_risk > (total_risk_usd_limit * 1.2): # Buffer 20%
+            if projected_risk > (total_risk_usd_limit * 1.2): 
                 return False, f"Total Risk Limit: ${projected_risk:.2f} > ${total_risk_usd_limit:.2f}"
 
             return True, "OK"
@@ -269,7 +268,6 @@ class RiskManager:
 
             trigger_dist = risk_dist * be_rr
 
-            # Buffer Dynamic: Max(2x Spread, 50 points)
             spread_buffer = 50 * point 
             if "XAU" in symbol_info.get('name', ''): 
                 spread_buffer = max(spread_buffer, entry_price * 0.0003) 

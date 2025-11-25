@@ -4,6 +4,7 @@ from .macd import MACD
 from .bollinger_bands import BollingerBands
 from .atr import ATR
 from .stochastic import Stochastic
+from .fibonacci import FibonacciRetracement
 
 __all__ = [
     'MovingAverage',
@@ -11,5 +12,6 @@ __all__ = [
     'MACD',
     'BollingerBands',
     'ATR',
-    'Stochastic'
+    'Stochastic',
+    'FibonacciRetracement'
 ]

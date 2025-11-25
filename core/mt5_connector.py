@@ -316,15 +316,8 @@ class MT5Connector:
         
         deviation = self._get_deviation(symbol_info)
         
-        if order_type == "BUY":
-            trade_type = mt5.ORDER_TYPE_BUY
-            price = symbol_info['ask']
-        elif order_type == "SELL":
-            trade_type = mt5.ORDER_TYPE_SELL
-            price = symbol_info['bid']
-        else:
-            print(f"Invalid order_type: {order_type}")
-            return None
+        trade_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
+        price = symbol_info['ask'] if order_type == "BUY" else symbol_info['bid']
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -341,28 +334,40 @@ class MT5Connector:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
-        result = mt5.order_send(request)
+        # --- SMART FILLING MODE SELECTOR ---
+        filling_modes = [
+            mt5.ORDER_FILLING_FOK,    # Prioritas 1: Fill or Kill
+            mt5.ORDER_FILLING_IOC,    # Prioritas 2: Immediate or Cancel
+            mt5.ORDER_FILLING_RETURN  # Prioritas 3: Return
+        ]
         
-        if result is None:
-            print(f"Order send failed (result is None): {mt5.last_error()}")
-            return None
+        result = None
         
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            # Fallback RETURN kalau IOC gagal
-            request["type_filling"] = mt5.ORDER_FILLING_RETURN
+        for mode in filling_modes:
+            request["type_filling"] = mode
             result = mt5.order_send(request)
             
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                print(f"Order failed: {result.retcode} - {result.comment}")
-                return None
+            if result is not None:
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"Order SENT ({mode}): {order_type} {volume} {symbol} @ {result.price}, Ticket: {result.order}")
+                    return {
+                        'ticket': result.order,
+                        'volume': result.volume,
+                        'price': result.price,
+                        'comment': result.comment
+                    }
+                elif result.retcode == 10030: # Unsupported filling mode
+                    continue # Coba mode berikutnya
+                else:
+                    print(f"Order failed (Mode {mode}): {result.retcode} - {result.comment}")
+                    break
+            else:
+                print(f"Order send failed (Result None) for mode {mode}")
         
-        print(f"Order SENT: {order_type} {volume} {symbol} @ {result.price}, Ticket: {result.order}")
-        return {
-            'ticket': result.order,
-            'volume': result.volume,
-            'price': result.price,
-            'comment': result.comment
-        }
+        if result and result.retcode != mt5.TRADE_RETCODE_DONE:
+             print(f"All filling modes failed. Last error: {result.comment}")
+             
+        return None
     
     def close_position(self, ticket):
         if not self.ensure_connected():
@@ -374,17 +379,12 @@ class MT5Connector:
             return False
         
         position = positions[0]
-        
         symbol_info = self.get_symbol_info(position.symbol)
         if not symbol_info:
             return False
         
-        if position.type == mt5.ORDER_TYPE_BUY:
-            trade_type = mt5.ORDER_TYPE_SELL
-            price = symbol_info['bid']
-        else:
-            trade_type = mt5.ORDER_TYPE_BUY
-            price = symbol_info['ask']
+        trade_type = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = symbol_info['bid'] if position.type == mt5.ORDER_TYPE_BUY else symbol_info['ask']
         
         deviation = self._get_deviation(symbol_info)
         
@@ -399,25 +399,26 @@ class MT5Connector:
             "magic": 234000,
             "comment": "Close position",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
-        result = mt5.order_send(request)
+        # --- SMART FILLING LOOP FOR CLOSE ---
+        filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
         
-        if result is None:
-            print(f"Close order failed: {mt5.last_error()}")
-            return False
-        
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            request["type_filling"] = mt5.ORDER_FILLING_RETURN
+        for mode in filling_modes:
+            request["type_filling"] = mode
             result = mt5.order_send(request)
             
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                print(f"Close failed: {result.retcode} - {result.comment}")
-                return False
+            if result is not None:
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"Position CLOSED: Ticket {ticket}, Symbol {position.symbol}")
+                    return True
+                elif result.retcode == 10030:
+                    continue
+                else:
+                    print(f"Close failed: {result.retcode} - {result.comment}")
+                    return False
         
-        print(f"Position CLOSED: Ticket {ticket}, Symbol {position.symbol}, Volume {position.volume}")
-        return True
+        return False
     
     def modify_position(self, ticket, sl=None, tp=None):
         if not self.ensure_connected():
@@ -425,11 +426,9 @@ class MT5Connector:
         
         positions = mt5.positions_get(ticket=ticket)
         if positions is None or len(positions) == 0:
-            print(f"Cannot modify. Position {ticket} not found.")
             return False
         
         position = positions[0]
-        
         sl_price = sl if sl is not None else position.sl
         tp_price = tp if tp is not None else position.tp
         
@@ -446,12 +445,7 @@ class MT5Connector:
         
         result = mt5.order_send(request)
         
-        if result is None:
-            print(f"Modify position {ticket} failed (Result is None): {mt5.last_error()}")
-            return False
-            
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"Modify position {ticket} failed: {result.retcode} - {result.comment} (Error: {mt5.last_error()})")
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             return False
         
         return True
@@ -462,30 +456,23 @@ class MT5Connector:
         
         positions = mt5.positions_get(ticket=ticket)
         if positions is None or len(positions) == 0:
-            print(f"Position {ticket} not found for partial close.")
             return False
         
         position = positions[0]
-        symbol = position.symbol
+        symbol_info = self.get_symbol_info(position.symbol)
         
-        symbol_info = self.get_symbol_info(symbol)
         lot_to_close = self._normalize_volume(lot_to_close, symbol_info)
-        
         if lot_to_close >= position.volume:
             return self.close_position(ticket)
 
         deviation = self._get_deviation(symbol_info)
         
-        if position.type == mt5.ORDER_TYPE_BUY:
-            trade_type = mt5.ORDER_TYPE_SELL
-            price = symbol_info['bid']
-        else:
-            trade_type = mt5.ORDER_TYPE_BUY
-            price = symbol_info['ask']
+        trade_type = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = symbol_info['bid'] if position.type == mt5.ORDER_TYPE_BUY else symbol_info['ask']
             
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
+            "symbol": position.symbol,
             "volume": lot_to_close,
             "type": trade_type,
             "position": ticket, 
@@ -494,22 +481,22 @@ class MT5Connector:
             "magic": 234000,
             "comment": comment if comment else f"Partial close of #{ticket}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
-        result = mt5.order_send(request)
+        # --- SMART FILLING LOOP FOR PARTIAL ---
+        filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
         
-        if result is None:
-            print(f"Partial close {ticket} failed (Result is None): {mt5.last_error()}")
-            return False
-        
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            request["type_filling"] = mt5.ORDER_FILLING_RETURN
+        for mode in filling_modes:
+            request["type_filling"] = mode
             result = mt5.order_send(request)
             
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                print(f"Partial close {ticket} failed: {result.retcode} - {result.comment}")
-                return False
+            if result is not None:
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"Position PARTIALLY CLOSED: Ticket {ticket}, Closed {lot_to_close} lots")
+                    return True
+                elif result.retcode == 10030:
+                    continue
+                else:
+                    return False
         
-        print(f"Position PARTIALLY CLOSED: Ticket {ticket}, Closed {lot_to_close} lots")
-        return True
+        return False
