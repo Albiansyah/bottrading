@@ -259,6 +259,32 @@ def edit_strategy_submenu(sm: SettingsManager):
     elif ch == '3': sm.set_trading_mode('TREND_ONLY')
     elif ch == '4': sm.set_trading_mode('BREAKOUT_ONLY')
 
+def trading_style_menu(sm: SettingsManager):
+    """
+    Ubah high-level trading style:
+    - SCALPING : fokus M5, entry cepat, tetap memanfaatkan HTF (H1)
+    - SWING    : fokus H1/H4, lebih selektif, trend-based
+    - AUTO     : engine memilih profile berdasarkan config
+    """
+    clear_screen()
+    print_box_separator(WIDTH, 'top')
+    print_box_line(f"{C_HEADER}TRADING STYLE", width=WIDTH)
+    try:
+        current_style = sm.get_trading_style()
+    except Exception:
+        current_style = "SCALPING"
+    print_box_line(f"Current: {C_VALUE}{current_style}", width=WIDTH)
+    print_box_separator(WIDTH, 'middle')
+    print_box_line(" [1] SCALPING  (M5 focus, cepat)", width=WIDTH)
+    print_box_line(" [2] SWING     (H1/H4 focus, pelan)", width=WIDTH)
+    print_box_line(" [3] AUTO      (ikut config)", width=WIDTH)
+    print_box_separator(WIDTH, 'bottom')
+
+    ch = input(C_YELLOW + "\nChoice: ").strip()
+    if ch == '1': sm.set_trading_style('SCALPING')
+    elif ch == '2': sm.set_trading_style('SWING')
+    elif ch == '3': sm.set_trading_style('AUTO')
+
 def profit_target_menu(sm: SettingsManager):
     ptm = ProfitTargetManager(sm)
     while True:
@@ -284,6 +310,31 @@ def profit_target_menu(sm: SettingsManager):
             t = input("New Target ($): ").strip()
             ptm.update_target(t)
         elif ch == '3': ptm.manual_reset()
+
+def trading_style_menu(sm: SettingsManager):
+    while True:
+        clear_screen()
+        curr_style = sm.get_trading_style()
+        print_box_separator(WIDTH, 'top')
+        print_box_line(f"{C_HEADER}TRADING STYLE PROFILE", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        print_box_line(f"Current Style: {C_VALUE}{curr_style}", width=WIDTH)
+        print_box_separator(WIDTH, 'middle')
+        print_box_line("[1] SCALPING  (M5, cepat, fokus scalper)", width=WIDTH)
+        print_box_line("[2] SWING     (H1/H4, trend & pullback)", width=WIDTH)
+        print_box_line("[3] AUTO      (Bot pilih profil)", width=WIDTH)
+        print_box_line("[0] Back", width=WIDTH)
+        print_box_separator(WIDTH, 'bottom')
+
+        ch = input(C_YELLOW + "\nChoice: ").strip()
+        if ch == '0':
+            break
+        elif ch == '1':
+            sm.set_trading_style('SCALPING')
+        elif ch == '2':
+            sm.set_trading_style('SWING')
+        elif ch == '3':
+            sm.set_trading_style('AUTO')
 
 def auto_detect_symbols_menu(sm: SettingsManager, mt5c: MT5Connector):
     clear_screen()
@@ -552,7 +603,11 @@ class GoldScalperBot:
 
         print_box_separator(WIDTH, 'middle')
         print_box_line(f"{C_LABEL}Session: {C_VALUE}{self.active_session_label}", width=WIDTH)
-        print_box_line(f"{C_LABEL}Mode: {C_YELLOW}{self.sm.get_trading_mode()}", width=WIDTH)
+        print_box_line(
+            f"{C_LABEL}Mode: {C_YELLOW}{self.sm.get_trading_mode()}",
+            f"Style: {C_VALUE}{self.sm.get_trading_style()}",
+            width=WIDTH
+        )
         
         if ptm_stats['enabled']:
             pnl_col = C_GREEN if ptm_stats['current'] >= 0 else C_RED
@@ -714,6 +769,7 @@ def main():
         print(C_TITLE + "="*WIDTH + C_RESET)
         
         print_box_line(f"Symbol: {sm.get_symbol()}", f"Mode: {sm.get_trading_mode()}")
+        print_box_line(f"Style: {sm.get_trading_style()}", "")
         print_box_separator()
         print_box_line(f" [1] Start LIVE Bot", "Run V4.6 Logic")
         print_box_line(f" [2] Position Manager", "Close Trades")
@@ -722,6 +778,7 @@ def main():
         print_box_line(f" [5] Load Preset", "Reset Config")
         print_box_line(f" [6] Symbol Detect", "Scan Pairs")
         print_box_line(f" [7] Profit Target", "Manage Goals")
+        print_box_line(f" [8] Trading Style", "Scalping / Swing / Auto")
         print_box_separator()
         print_box_line(f" [0] Exit", "")
         
@@ -754,6 +811,7 @@ def main():
              time.sleep(2)
         elif ch == '6': auto_detect_symbols_menu(sm, mt5c)
         elif ch == '7': profit_target_menu(sm)
+        elif ch == '8': trading_style_menu(sm)
         elif ch == '0': sys.exit()
 
 if __name__ == "__main__":
