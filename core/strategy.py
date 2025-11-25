@@ -27,10 +27,24 @@ class TradingStrategy:
         ind = self.settings['indicators']
         sig = self.settings['signal_requirements']
         
+        # Trading Style: SCALPING / SWING / AUTO
+        # Ini mengontrol cara engine memilih mode & threshold,
+        # tapi di dalamnya tetap AUTO (bisa SNIPER/TREND/BREAKOUT)
+        try:
+            self.trading_style = self.sm.get_trading_style().upper()
+        except Exception:
+            self.trading_style = 'SCALPING'
+
         self.settings.setdefault('debug', {})
         self.debug_config = self.settings['debug']
         self.log_mtf = self.debug_config.get('log_mtf_filter', False)
         self.log_regime = self.debug_config.get('log_regime_changes', False)
+
+        # High-level trading style profile (SCALPING / SWING / AUTO)
+        try:
+            self.trading_style = self.sm.get_trading_style().upper()
+        except Exception:
+            self.trading_style = 'SCALPING'
 
         self.ma = MovingAverage(period=ind['ma_period'], shift=ind['ma_shift'])
         self.ma_long = MovingAverage(period=ind['ma_long_period'], shift=ind['ma_shift']) 
@@ -57,6 +71,7 @@ class TradingStrategy:
         
         self.cp = CandlePattern() 
         
+        # Default MTF config akan disesuaikan lagi oleh style profile
         self.htf_timeframe = sig.get('higher_timeframe', 'H1') 
         self.enable_mtf = sig.get('enable_mtf', True)
         self.ma_htf = MovingAverage(period=50) 
@@ -72,6 +87,7 @@ class TradingStrategy:
         
         self.min_exit_score = float(sig.get('min_exit_score', 2.0))
 
+        # Nilai ini akan di-tune ulang oleh style profile (SCALPING / SWING)
         self.min_conf_sniper = self._base_min_conf_sniper
         self.min_conf_trend  = self._base_min_conf_trend
         self.min_conf_pullback = self._base_min_conf_pullback
@@ -80,12 +96,99 @@ class TradingStrategy:
         self.current_regime = "UNKNOWN"
         self.regime_details = {} 
 
+        # Terapkan profil awal berdasarkan trading_style
+        self._apply_style_profile(self.trading_style) 
+
         self.ai_analyzer = None
         if sig.get('use_ai', False) and AIAnalyzer is not None:
             try:
                 self.ai_analyzer = AIAnalyzer(self.settings)
             except Exception:
                 self.ai_analyzer = None
+
+    def _apply_style_profile(self, style: str):
+        """
+        Sesuaikan parameter strategi berdasarkan trading_style:
+        - SCALPING : fokus M5, entry cepat, gunakan HTF H1 sebagai kompas
+        - SWING    : fokus H1/H4, lebih strict, gunakan HTF H4 sebagai kompas
+        - AUTO     : gunakan setting bawaan dari file config
+        """
+        s = (style or "SCALPING").upper()
+
+        if s == "SCALPING":
+            # Style scalping: cenderung agresif tapi tetap hormat HTF
+            self.enable_mtf = True
+            # Untuk scalping di M5, HTF default ke H1
+            self.htf_timeframe = "H1"
+
+            # Turunkan sedikit threshold sniper supaya lebih mudah tembak
+            self.min_conf_sniper = max(0.3, self._base_min_conf_sniper - 0.5)
+            # Trend & breakout tetap butuh konfirmasi cukup
+            self.min_conf_trend = max(1.0, self._base_min_conf_trend)
+            self.min_conf_breakout = max(0.8, self._base_min_conf_breakout - 0.2)
+
+        elif s == "SWING":
+            # Style swing: fokus trend besar (H1/H4), lebih selektif
+            self.enable_mtf = True
+            # Untuk swing di H1, gunakan H4 sebagai kompas
+            self.htf_timeframe = "H4"
+
+            # Naikkan sedikit threshold agar hanya ambil setup kualitas tinggi
+            self.min_conf_sniper = self._base_min_conf_sniper + 0.5
+            self.min_conf_trend = max(1.5, self._base_min_conf_trend + 0.5)
+            self.min_conf_breakout = max(1.2, self._base_min_conf_breakout + 0.3)
+
+        else:
+            # AUTO: gunakan nilai dasar dari config tanpa banyak modifikasi
+            self.enable_mtf = self.signal_config.get('enable_mtf', True)
+            self.htf_timeframe = self.signal_config.get('higher_timeframe', 'H1')
+            self.min_conf_sniper = self._base_min_conf_sniper
+            self.min_conf_trend = self._base_min_conf_trend
+            self.min_conf_breakout = self._base_min_conf_breakout
+
+    def _apply_style_profile(self, style: str):
+        """
+        Set parameter & MTF behaviour berdasarkan trading_style:
+        - SCALPING: fokus TF cepat (M5), lebih agresif, tetap hormat HTF
+        - SWING: fokus TF besar (H1/H4), lebih selektif, trend-follow ketat
+        - AUTO (default): gunakan konfigurasi dari file settings apa adanya
+        """
+        style = (style or 'SCALPING').upper()
+        self.trading_style = style
+
+        # Default: gunakan nilai base dari config
+        self.min_conf_sniper = self._base_min_conf_sniper
+        self.min_conf_trend = self._base_min_conf_trend
+        self.min_conf_pullback = self._base_min_conf_pullback
+        self.min_conf_breakout = self._base_min_conf_breakout
+
+        if style == 'SCALPING':
+            # Entry di TF cepat (umumnya M5), gunakan HTF = H1 sebagai kompas trend
+            self.htf_timeframe = 'H1'
+            self.enable_mtf = True
+
+            # Buat sedikit lebih mudah untuk tembak signal sniper,
+            # tapi tetap menjaga trend/breakout tidak terlalu liar
+            self.min_conf_sniper = max(0.5, self._base_min_conf_sniper - 0.5)
+            self.min_conf_trend = self._base_min_conf_trend
+            self.min_conf_pullback = self._base_min_conf_pullback
+            self.min_conf_breakout = max(0.5, self._base_min_conf_breakout - 0.2)
+
+        elif style == 'SWING':
+            # Entry di TF besar (H1/H4), gunakan HTF lebih besar lagi (H4)
+            self.htf_timeframe = 'H4'
+            self.enable_mtf = True
+
+            # Untuk swing, kita ingin konfirmasi lebih kuat
+            self.min_conf_sniper = self._base_min_conf_sniper + 0.5
+            self.min_conf_trend = max(1.0, self._base_min_conf_trend)
+            self.min_conf_pullback = self._base_min_conf_pullback + 0.5
+            self.min_conf_breakout = self._base_min_conf_breakout + 0.5
+
+        else:
+            # AUTO: gunakan setting file seadanya
+            self.htf_timeframe = self.signal_config.get('higher_timeframe', 'H1')
+            self.enable_mtf = self.signal_config.get('enable_mtf', True)
 
     def analyze(self, df_main: pd.DataFrame, session: str, df_htf: pd.DataFrame = None, is_backtest: bool = False):
         if df_main is None or len(df_main) < 205:
@@ -98,11 +201,36 @@ class TradingStrategy:
              mode = manual_mode
         else:
              regime = self.current_regime
-             if regime == "TRENDING": mode = "TREND_ONLY"
-             elif regime == "RANGING": mode = "SNIPER_ONLY"
-             elif regime == "BREAKOUT": mode = "TREND_ONLY"
-             elif regime == "VOLATILE": mode = "SNIPER_ONLY"
-             else: mode = "SNIPER_ONLY"
+             # Mapping regime -> mode disesuaikan dengan trading_style,
+             # tapi tetap fleksibel (engine bisa SNIPER/TREND/BREAKOUT)
+             if self.trading_style == 'SCALPING':
+                 if regime in ["RANGING", "VOLATILE"]: mode = "SNIPER_ONLY"
+                 elif regime in ["TRENDING", "BREAKOUT"]: mode = "TREND_ONLY"
+                 else: mode = "SNIPER_ONLY"
+             elif self.trading_style == 'SWING':
+                 if regime in ["TRENDING", "BREAKOUT"]: mode = "TREND_ONLY"
+                 elif regime == "RANGING": mode = "SNIPER_ONLY"
+                 else: mode = "TREND_ONLY"
+             else:
+                 if regime == "TRENDING": mode = "TREND_ONLY"
+                 elif regime == "RANGING": mode = "SNIPER_ONLY"
+                 elif regime == "BREAKOUT": mode = "TREND_ONLY"
+                 elif regime == "VOLATILE": mode = "SNIPER_ONLY"
+                 else: mode = "SNIPER_ONLY"
+
+             elif self.trading_style == "SWING":
+                 # Swing: fokus tren besar, gunakan TREND/PULLBACK sebagai default
+                 if regime in ["TRENDING", "BREAKOUT"]: mode = "TREND_ONLY"
+                 elif regime == "RANGING": mode = "SNIPER_ONLY"
+                 else: mode = "TREND_ONLY"
+
+             else:
+                 # Default AUTO behaviour lama
+                 if regime == "TRENDING": mode = "TREND_ONLY"
+                 elif regime == "RANGING": mode = "SNIPER_ONLY"
+                 elif regime == "BREAKOUT": mode = "TREND_ONLY"
+                 elif regime == "VOLATILE": mode = "SNIPER_ONLY"
+                 else: mode = "SNIPER_ONLY"
 
         sigs = {}
         sc = self.signal_config

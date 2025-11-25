@@ -45,7 +45,12 @@ class SettingsManager:
                 'timeframe': 'M5',
                 'default_lot': 0.01,
                 'max_positions': 5,
-                'max_positions_per_direction': 3
+                'max_positions_per_direction': 3,
+                # Default trading style profile:
+                # SCALPING -> fokus TF cepat (M5)
+                # SWING    -> fokus TF besar (H1/H4)
+                # AUTO     -> bot yang pilih profile berdasarkan kondisi
+                'trading_style': 'SCALPING'
             },
             KEY_RISK: {
                 'max_total_risk_pct': 5.0,
@@ -375,6 +380,7 @@ class SettingsManager:
             elif key == 'max_positions': return 1 <= int(value) <= 20
             elif key == 'max_spread': return 0 <= int(value) <= 500
             elif key == 'asia_session_mode': return str(value).upper() in ['DEFENSIVE', 'AGGRESSIVE']
+            elif key == 'trading_style': return str(value).upper() in ['SCALPING', 'SWING', 'AUTO']
             return True
         except: return False
 
@@ -412,6 +418,10 @@ class SettingsManager:
     def set_lot_size(self, v): return self._set_val(KEY_TRADING, 'default_lot', v)
     def get_max_positions(self): return int(self._get(KEY_TRADING, 'max_positions', 5))
     def set_max_positions(self, v): return self._set_val(KEY_TRADING, 'max_positions', v)
+
+    # Trading Style Profile: SCALPING / SWING / AUTO
+    def get_trading_style(self): return self._get(KEY_TRADING, 'trading_style', 'SCALPING')
+    def set_trading_style(self, v): return self._set_val(KEY_TRADING, 'trading_style', v)
 
     def get_risk_per_trade(self): return float(self._get(KEY_RISK, 'risk_per_trade_pct', 1.0))
     def set_risk_per_trade(self, v): return self._set_val(KEY_RISK, 'risk_per_trade_pct', v)
