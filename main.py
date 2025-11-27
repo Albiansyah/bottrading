@@ -659,22 +659,31 @@ class GoldScalperBot:
                 self.executor.trading_config['default_lot'] = final_lot
 
             filters = {
-                'news_filter': self.news_filter, 
-                'session_filter': self.session_filter, 
+                'news_filter': self.news_filter,
+                'session_filter': self.session_filter,
                 'spread_filter': self.spread_filter
             }
-            can_trade, session_name = self.executor.can_trade(filters)
-            
-            if can_trade:
-                closed_list = self.executor.reconcile_closed_by_broker()
-                if closed_list:
-                    for closed in closed_list:
-                        self.telegram.notify_exit(closed)
-                        self.ptm.add_trade_result(closed.get('profit', 0.0))
-                
-                self.executor.manage_positions()
-                self.executor.check_exit_signals(session_name)
-                self.check_entries(session_name)
+            can_trade, session_result = self.executor.can_trade(filters)
+
+            if not can_trade:
+                # Jika diblokir oleh filter (session/spread/news/margin/daily loss),
+                # simpan alasannya supaya terlihat di dashboard.
+                self.bot_state = "WAIT_FILTER"
+                self.error_msg = str(session_result)
+                return
+
+            # can_trade == True -> session_result berisi nama sesi aktif
+            session_name = session_result
+
+            closed_list = self.executor.reconcile_closed_by_broker()
+            if closed_list:
+                for closed in closed_list:
+                    self.telegram.notify_exit(closed)
+                    self.ptm.add_trade_result(closed.get('profit', 0.0))
+
+            self.executor.manage_positions()
+            self.executor.check_exit_signals(session_name)
+            self.check_entries(session_name)
 
         except Exception as e:
             tb = traceback.format_exc()
