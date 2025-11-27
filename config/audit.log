@@ -25,3 +25,5 @@
 [2025-11-21 08:47:27] UPDATE | Key: signal_requirements.strategy_mode_override | Old: BREAKOUT_ONLY -> New: AUTO
 [2025-11-25 04:37:31] UPDATE | Key: signal_requirements.strategy_mode_override | Old: AUTO -> New: TREND
 [2025-11-25 04:37:32] UPDATE | Key: signal_requirements.strategy_mode_override | Old: TREND -> New: AUTO
+[2025-11-25 11:40:40] UPDATE | Key: trading.trading_style | Old: SCALPING -> New: SWING
+[2025-11-25 11:40:41] UPDATE | Key: trading.trading_style | Old: SWING -> New: SCALPING

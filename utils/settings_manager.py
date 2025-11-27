@@ -15,7 +15,7 @@ KEY_FILTERS = 'filters'
 KEY_DEBUG = 'debug'
 KEY_BACKTEST = 'backtesting'
 KEY_INDICATORS = 'indicators'
-KEY_META = '_meta' 
+KEY_META = '_meta'
 
 CURRENT_CONFIG_VERSION = 1
 
@@ -28,12 +28,12 @@ class SettingsManager:
         self.backup_dir = 'config/backups'
         self.audit_file = 'config/audit.log'
         self.temp_path = f"{settings_path}.tmp"
-        
+
         self._settings_cache: Dict[str, Any] = {}
-        
+
         os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
         os.makedirs(self.backup_dir, exist_ok=True)
-        
+
         self._load_and_validate()
 
     def _get_defaults(self) -> Dict[str, Any]:
@@ -45,7 +45,12 @@ class SettingsManager:
                 'timeframe': 'M5',
                 'default_lot': 0.01,
                 'max_positions': 5,
-                'max_positions_per_direction': 3
+                'max_positions_per_direction': 3,
+                # Trading style profile:
+                # SCALPING -> fokus TF cepat (M5)
+                # SWING    -> fokus TF besar (H1/H4)
+                # AUTO     -> pakai aturan dari config apa adanya
+                'trading_style': 'SCALPING'
             },
             KEY_RISK: {
                 'max_total_risk_pct': 5.0,
@@ -105,8 +110,8 @@ class SettingsManager:
             },
             KEY_FILTERS: {
                 'news_filter_enabled': True,
-                'news_before_minutes': 30, 
-                'news_after_minutes': 30,  
+                'news_before_minutes': 30,
+                'news_after_minutes': 30,
                 'session_filter_enabled': True,
                 'min_atr_value': 0.2,
                 'allowed_sessions': ['asian', 'london', 'us'],
@@ -139,13 +144,14 @@ class SettingsManager:
     def _migrate_schema(self, data: Dict) -> Dict:
         meta = data.get(KEY_META, {})
         version = meta.get('version', 0)
-        
+
         if version < CURRENT_CONFIG_VERSION:
             print(f"[Settings] Migrating config from v{version} to v{CURRENT_CONFIG_VERSION}...")
-            if KEY_META not in data: data[KEY_META] = {}
+            if KEY_META not in data:
+                data[KEY_META] = {}
             data[KEY_META]['version'] = CURRENT_CONFIG_VERSION
             data[KEY_META]['last_migration'] = str(datetime.now())
-            
+
         return data
 
     def _load_and_validate(self):
@@ -163,7 +169,7 @@ class SettingsManager:
                     return self._load_and_validate()
                 else:
                     loaded = self._get_defaults()
-            
+
             loaded = self._migrate_schema(loaded)
             self._settings_cache = self._validate_schema(loaded)
             self.save_settings(log_audit=False)
@@ -186,8 +192,9 @@ class SettingsManager:
         with self._lock:
             try:
                 self._validate_cross_fields()
-                
-                if KEY_META not in self._settings_cache: self._settings_cache[KEY_META] = {}
+
+                if KEY_META not in self._settings_cache:
+                    self._settings_cache[KEY_META] = {}
                 self._settings_cache[KEY_META]['last_updated'] = str(datetime.now())
 
                 with open(self.temp_path, 'w') as f:
@@ -199,18 +206,19 @@ class SettingsManager:
                 return True
             except Exception as e:
                 print(f"[Settings] Save failed: {e}")
-                if os.path.exists(self.temp_path): os.remove(self.temp_path)
+                if os.path.exists(self.temp_path):
+                    os.remove(self.temp_path)
                 return False
 
     def _validate_cross_fields(self):
         rm = self._settings_cache.get(KEY_RISK, {})
         if rm.get('risk_per_trade_pct', 0) > rm.get('max_total_risk_pct', 100):
-             rm['risk_per_trade_pct'] = rm['max_total_risk_pct']
+            rm['risk_per_trade_pct'] = rm['max_total_risk_pct']
         if rm.get('max_single_position_risk_pct', 0) > rm.get('max_total_risk_pct', 100):
-             rm['max_single_position_risk_pct'] = rm['max_total_risk_pct']
+            rm['max_single_position_risk_pct'] = rm['max_total_risk_pct']
 
     # --- PRESETS (Deep Merge) ---
-    
+
     def get_setting_presets(self) -> Dict[str, Dict]:
         return {
             'CONSERVATIVE': {
@@ -260,24 +268,26 @@ class SettingsManager:
         with self._lock:
             try:
                 presets = self.get_setting_presets()
-                if preset_name not in presets: return False, "Preset not found"
+                if preset_name not in presets:
+                    return False, "Preset not found"
 
                 self.backup_settings(auto=True)
 
                 temp_settings = deepcopy(self._settings_cache)
                 preset_data = presets[preset_name]['settings']
-                
+
                 temp_settings = self._deep_update(temp_settings, preset_data)
                 temp_settings['active_preset'] = preset_name
-                
+
                 self._validate_schema(temp_settings)
-                
+
                 old_preset = self._settings_cache.get('active_preset', 'None')
                 self._settings_cache = temp_settings
-                
+
                 self._log_audit("LOAD_PRESET", "Preset", old_preset, preset_name)
-                
-                if self.save_settings(): return True, f"Loaded {preset_name}"
+
+                if self.save_settings():
+                    return True, f"Loaded {preset_name}"
                 return False, "Save failed"
             except Exception as e:
                 return False, str(e)
@@ -291,16 +301,17 @@ class SettingsManager:
                 prefix = "auto_" if auto else ""
                 fname = f"{prefix}settings_backup_{ts}.json"
                 fpath = os.path.join(self.backup_dir, fname)
-                
+
                 # Atomic Copy
                 temp_backup = fpath + ".tmp"
                 with open(temp_backup, 'w') as f:
                     json.dump(self._settings_cache, f, indent=2)
                 os.replace(temp_backup, fpath)
-                
+
                 self._cleanup_old_backups()
                 return True, fpath
-            except Exception as e: return False, str(e)
+            except Exception as e:
+                return False, str(e)
 
     def _cleanup_old_backups(self):
         try:
@@ -311,9 +322,12 @@ class SettingsManager:
                         files.append((entry.path, entry.stat().st_mtime))
             files.sort(key=lambda x: x[1], reverse=True)
             for fpath, _ in files[10:]:
-                try: os.remove(fpath)
-                except: pass
-        except: pass
+                try:
+                    os.remove(fpath)
+                except:
+                    pass
+        except:
+            pass
 
     def list_backups(self) -> List[Dict[str, Any]]:
         backups = []
@@ -323,76 +337,105 @@ class SettingsManager:
                     if entry.is_file() and entry.name.endswith('.json'):
                         try:
                             ts = datetime.fromtimestamp(entry.stat().st_mtime)
-                            backups.append({'filename': entry.name, 'path': entry.path, 'timestamp': ts, 'is_auto': 'auto_' in entry.name})
-                        except: continue
+                            backups.append({
+                                'filename': entry.name,
+                                'path': entry.path,
+                                'timestamp': ts,
+                                'is_auto': 'auto_' in entry.name
+                            })
+                        except:
+                            continue
             backups.sort(key=lambda x: x['timestamp'], reverse=True)
-        except: pass
+        except:
+            pass
         return backups
 
     def _restore_last_working(self) -> bool:
         backups = self.list_backups()
-        if not backups: return False
+        if not backups:
+            return False
         try:
             shutil.copy2(backups[0]['path'], self.settings_path)
             return True
-        except: return False
+        except:
+            return False
 
     def restore_settings(self, backup_index: int) -> Tuple[bool, str]:
         with self._lock:
             backups = self.list_backups()
-            if not (0 <= backup_index < len(backups)): return False, "Invalid index"
+            if not (0 <= backup_index < len(backups)):
+                return False, "Invalid index"
             try:
-                with open(backups[backup_index]['path'], 'r') as f: data = json.load(f)
+                with open(backups[backup_index]['path'], 'r') as f:
+                    data = json.load(f)
                 self._settings_cache = self._validate_schema(data)
                 self._log_audit("RESTORE", "Backup", "Current", backups[backup_index]['filename'])
                 self.save_settings()
                 return True, "Restored"
-            except Exception as e: return False, str(e)
+            except Exception as e:
+                return False, str(e)
 
     def compare_backup(self, backup_index: int) -> str:
         backups = self.list_backups()
-        if not (0 <= backup_index < len(backups)): return "Invalid Index"
+        if not (0 <= backup_index < len(backups)):
+            return "Invalid Index"
         try:
-            with open(backups[backup_index]['path'], 'r') as f: backup_data = json.load(f)
+            with open(backups[backup_index]['path'], 'r') as f:
+                backup_data = json.load(f)
             diffs = []
             for section in [KEY_RISK, KEY_TRADING, KEY_SIGNALS]:
                 curr = self._settings_cache.get(section, {})
                 back = backup_data.get(section, {})
                 for k, v in curr.items():
                     bv = back.get(k, "N/A")
-                    if v != bv: diffs.append(f"[{section}][{k}]: Curr={v} | Back={bv}")
+                    if v != bv:
+                        diffs.append(f"[{section}][{k}]: Curr={v} | Back={bv}")
             return "\n".join(diffs) if diffs else "No major differences."
-        except Exception as e: return f"Diff error: {e}"
+        except Exception as e:
+            return f"Diff error: {e}"
 
     # --- SETTERS ---
 
     def _validate_input(self, key: str, value: Any) -> bool:
         try:
-            if key == 'risk_per_trade_pct': return 0.1 <= float(value) <= 100.0
-            elif key == 'max_total_risk_pct': return 1.0 <= float(value) <= 100.0
-            elif key == 'default_lot': return float(value) >= 0.0
-            elif key == 'timeframe': return str(value).upper() in ['M1','M5','M15','M30','H1','H4','D1']
-            elif key == 'max_positions': return 1 <= int(value) <= 20
-            elif key == 'max_spread': return 0 <= int(value) <= 500
-            elif key == 'asia_session_mode': return str(value).upper() in ['DEFENSIVE', 'AGGRESSIVE']
+            if key == 'risk_per_trade_pct':
+                return 0.1 <= float(value) <= 100.0
+            elif key == 'max_total_risk_pct':
+                return 1.0 <= float(value) <= 100.0
+            elif key == 'default_lot':
+                return float(value) >= 0.0
+            elif key == 'timeframe':
+                return str(value).upper() in ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
+            elif key == 'max_positions':
+                return 1 <= int(value) <= 20
+            elif key == 'max_spread':
+                return 0 <= int(value) <= 500
+            elif key == 'asia_session_mode':
+                return str(value).upper() in ['DEFENSIVE', 'AGGRESSIVE']
+            elif key == 'trading_style':
+                return str(value).upper() in ['SCALPING', 'SWING', 'AUTO']
             return True
-        except: return False
+        except:
+            return False
 
     def _set_val(self, section: str, key: str, value: Any, audit=True) -> bool:
         with self._lock:
             if not self._validate_input(key, value):
                 print(f"[Settings] ❌ Invalid Input: {key}={value}")
                 return False
-                
-            if section not in self._settings_cache: self._settings_cache[section] = {}
-            
+
+            if section not in self._settings_cache:
+                self._settings_cache[section] = {}
+
             old_val = self._settings_cache[section].get(key)
-            
-            if key in ['timeframe', 'strategy_mode_override', 'symbol', 'asia_session_mode']:
+
+            if key in ['timeframe', 'strategy_mode_override', 'symbol', 'asia_session_mode', 'trading_style']:
                 value = str(value).upper()
             elif old_val is not None:
-                try: value = type(old_val)(value)
-                except: pass
+                try:
+                    value = type(old_val)(value)
+                except:
+                    pass
 
             self._settings_cache[section][key] = value
             if audit and old_val != value:
@@ -404,50 +447,111 @@ class SettingsManager:
     def _get(self, section: str, key: str, default=None):
         return self._settings_cache.get(section, {}).get(key, default)
 
-    def get_symbol(self): return self._get(KEY_TRADING, 'symbol', 'XAUUSD')
-    def set_symbol(self, v): return self._set_val(KEY_TRADING, 'symbol', v)
-    def get_timeframe(self): return self._get(KEY_TRADING, 'timeframe', 'M5')
-    def set_timeframe(self, v): return self._set_val(KEY_TRADING, 'timeframe', v)
-    def get_lot_size(self): return float(self._get(KEY_TRADING, 'default_lot', 0.0))
-    def set_lot_size(self, v): return self._set_val(KEY_TRADING, 'default_lot', v)
-    def get_max_positions(self): return int(self._get(KEY_TRADING, 'max_positions', 5))
-    def set_max_positions(self, v): return self._set_val(KEY_TRADING, 'max_positions', v)
+    def get_symbol(self):
+        return self._get(KEY_TRADING, 'symbol', 'XAUUSD')
 
-    def get_risk_per_trade(self): return float(self._get(KEY_RISK, 'risk_per_trade_pct', 1.0))
-    def set_risk_per_trade(self, v): return self._set_val(KEY_RISK, 'risk_per_trade_pct', v)
-    def get_max_total_risk(self): return float(self._get(KEY_RISK, 'max_total_risk_pct', 5.0))
-    def set_max_total_risk(self, v): return self._set_val(KEY_RISK, 'max_total_risk_pct', v)
-    def get_margin_filter_enabled(self): return self._get(KEY_RISK, 'enable_margin_filter', True)
-    def toggle_margin_filter(self): return self._set_val(KEY_RISK, 'enable_margin_filter', not self.get_margin_filter_enabled())
-    def get_min_margin_level(self): return float(self._get(KEY_RISK, 'min_margin_level_pct', 500.0))
-    def set_min_margin_level(self, v): return self._set_val(KEY_RISK, 'min_margin_level_pct', v)
+    def set_symbol(self, v):
+        return self._set_val(KEY_TRADING, 'symbol', v)
 
-    def get_news_filter_enabled(self): return self._get(KEY_FILTERS, 'news_filter_enabled', True)
-    def toggle_news_filter(self): return self._set_val(KEY_FILTERS, 'news_filter_enabled', not self.get_news_filter_enabled())
-    def get_session_filter_enabled(self): return self._get(KEY_FILTERS, 'session_filter_enabled', True)
-    def toggle_session_filter(self): return self._set_val(KEY_FILTERS, 'session_filter_enabled', not self.get_session_filter_enabled())
-    def get_allowed_sessions(self): return self._get(KEY_FILTERS, 'allowed_sessions', [])
-    def set_allowed_sessions(self, v): return self._set_val(KEY_FILTERS, 'allowed_sessions', v)
-    
-    def get_min_atr(self): return float(self._get(KEY_FILTERS, 'min_atr_value', 0.2))
-    def set_min_atr(self, v): return self._set_val(KEY_FILTERS, 'min_atr_value', v)
-    
-    def get_max_spread(self): return int(self._get(KEY_FILTERS, 'spread_settings', {}).get('default_max', 35))
-    def set_max_spread(self, v): 
+    def get_timeframe(self):
+        return self._get(KEY_TRADING, 'timeframe', 'M5')
+
+    def set_timeframe(self, v):
+        return self._set_val(KEY_TRADING, 'timeframe', v)
+
+    def get_lot_size(self):
+        return float(self._get(KEY_TRADING, 'default_lot', 0.0))
+
+    def set_lot_size(self, v):
+        return self._set_val(KEY_TRADING, 'default_lot', v)
+
+    def get_max_positions(self):
+        return int(self._get(KEY_TRADING, 'max_positions', 5))
+
+    def set_max_positions(self, v):
+        return self._set_val(KEY_TRADING, 'max_positions', v)
+
+    # Trading style profile: SCALPING / SWING / AUTO
+    def get_trading_style(self):
+        return self._get(KEY_TRADING, 'trading_style', 'SCALPING')
+
+    def set_trading_style(self, v):
+        return self._set_val(KEY_TRADING, 'trading_style', v)
+
+    def get_risk_per_trade(self):
+        return float(self._get(KEY_RISK, 'risk_per_trade_pct', 1.0))
+
+    def set_risk_per_trade(self, v):
+        return self._set_val(KEY_RISK, 'risk_per_trade_pct', v)
+
+    def get_max_total_risk(self):
+        return float(self._get(KEY_RISK, 'max_total_risk_pct', 5.0))
+
+    def set_max_total_risk(self, v):
+        return self._set_val(KEY_RISK, 'max_total_risk_pct', v)
+
+    def get_margin_filter_enabled(self):
+        return self._get(KEY_RISK, 'enable_margin_filter', True)
+
+    def toggle_margin_filter(self):
+        return self._set_val(KEY_RISK, 'enable_margin_filter', not self.get_margin_filter_enabled())
+
+    def get_min_margin_level(self):
+        return float(self._get(KEY_RISK, 'min_margin_level_pct', 500.0))
+
+    def set_min_margin_level(self, v):
+        return self._set_val(KEY_RISK, 'min_margin_level_pct', v)
+
+    def get_news_filter_enabled(self):
+        return self._get(KEY_FILTERS, 'news_filter_enabled', True)
+
+    def toggle_news_filter(self):
+        return self._set_val(KEY_FILTERS, 'news_filter_enabled', not self.get_news_filter_enabled())
+
+    def get_session_filter_enabled(self):
+        return self._get(KEY_FILTERS, 'session_filter_enabled', True)
+
+    def toggle_session_filter(self):
+        return self._set_val(KEY_FILTERS, 'session_filter_enabled', not self.get_session_filter_enabled())
+
+    def get_allowed_sessions(self):
+        return self._get(KEY_FILTERS, 'allowed_sessions', [])
+
+    def set_allowed_sessions(self, v):
+        return self._set_val(KEY_FILTERS, 'allowed_sessions', v)
+
+    def get_min_atr(self):
+        return float(self._get(KEY_FILTERS, 'min_atr_value', 0.2))
+
+    def set_min_atr(self, v):
+        return self._set_val(KEY_FILTERS, 'min_atr_value', v)
+
+    def get_max_spread(self):
+        return int(self._get(KEY_FILTERS, 'spread_settings', {}).get('default_max', 35))
+
+    def set_max_spread(self, v):
         with self._lock:
             if 'spread_settings' not in self._settings_cache[KEY_FILTERS]:
                 self._settings_cache[KEY_FILTERS]['spread_settings'] = {}
             self._settings_cache[KEY_FILTERS]['spread_settings']['default_max'] = int(v)
             return self.save_settings()
 
-    def get_trading_mode(self): return self._get(KEY_SIGNALS, 'strategy_mode_override', 'AUTO')
-    def set_trading_mode(self, v): return self._set_val(KEY_SIGNALS, 'strategy_mode_override', v)
-    
-    # [FIX: Added Missing Method for Asia Mode]
-    def get_asia_session_mode(self): return self._get(KEY_FILTERS, 'asia_session_mode', 'DEFENSIVE')
-    def set_asia_session_mode(self, v): return self._set_val(KEY_FILTERS, 'asia_session_mode', v.upper())
+    def get_trading_mode(self):
+        return self._get(KEY_SIGNALS, 'strategy_mode_override', 'AUTO')
 
-    def get_backtest_config(self): return self._get(KEY_BACKTEST, 'config', {})
+    def set_trading_mode(self, v):
+        return self._set_val(KEY_SIGNALS, 'strategy_mode_override', v)
+
+    # [FIX: Added Missing Method for Asia Mode]
+    def get_asia_session_mode(self):
+        return self._get(KEY_FILTERS, 'asia_session_mode', 'DEFENSIVE')
+
+    def set_asia_session_mode(self, v):
+        return self._set_val(KEY_FILTERS, 'asia_session_mode', v.upper())
+
+    def get_backtest_config(self):
+        return self._get(KEY_BACKTEST, 'config', {})
+
     def set_backtest_period(self, s, e):
         with self._lock:
             self._settings_cache[KEY_BACKTEST]['start_date'] = s
@@ -458,7 +562,7 @@ class SettingsManager:
     def get_health_status(self) -> Tuple[str, str, List[str]]:
         warnings = []
         danger = 0
-        
+
         rm = self._settings_cache.get(KEY_RISK, {})
         sig = self._settings_cache.get(KEY_SIGNALS, {})
         flt = self._settings_cache.get(KEY_FILTERS, {})
@@ -468,24 +572,26 @@ class SettingsManager:
         if risk_per > 3:
             warnings.append(f"⚠️ Aggressive Risk ({risk_per}%)")
             danger += 1
-            
+
         mtf_on = sig.get('enable_mtf', True)
         if not mtf_on:
             if 'SCALPER' not in active_preset:
                 warnings.append("⚠️ MTF Filter OFF (Risky)")
                 danger += 1
-        
+
         news_on = flt.get('news_filter_enabled', True)
         if not news_on:
             if 'SCALPER' not in active_preset:
-                 warnings.append("⚠️ News Filter OFF")
+                warnings.append("⚠️ News Filter OFF")
 
         if not rm.get('enable_margin_filter', True):
             warnings.append("🔴 DANGER: Margin Filter OFF")
             danger += 2
 
-        if danger > 1: return "🔴", "CRITICAL", warnings
-        if danger > 0 or warnings: return "🟡", "WARNING", warnings
+        if danger > 1:
+            return "🔴", "CRITICAL", warnings
+        if danger > 0 or warnings:
+            return "🟡", "WARNING", warnings
         return "🟢", "HEALTHY", []
 
     def get_summary(self, balance: float = 10000.0) -> str:
@@ -497,25 +603,26 @@ class SettingsManager:
         emoji, status, warns = self.get_health_status()
         lines.append(f" {emoji} Health: {status}")
         if self._settings_cache.get('active_preset'):
-             lines.append(f" 💾 Preset: {self._settings_cache['active_preset']}")
+            lines.append(f" 💾 Preset: {self._settings_cache['active_preset']}")
         lines.append("")
 
         lines.append(" 📊 TRADING:")
         lines.append(f" Symbol:        {self.get_symbol()}")
         lines.append(f" Timeframe:     {self.get_timeframe()}")
         lines.append(f" Mode:          {self.get_trading_mode()}")
+        lines.append(f" Style:         {self.get_trading_style()}")
         lines.append("")
 
         lines.append(" 💰 RISK:")
         risk_pct = self.get_risk_per_trade()
         risk_usd = balance * (risk_pct / 100.0)
         lines.append(f" Per Trade:     {risk_pct}% (~${risk_usd:.2f})")
-        
+
         max_risk = self.get_max_total_risk()
         max_usd = balance * (max_risk / 100.0)
         lines.append(f" Max Total:     {max_risk}% (~${max_usd:.2f})")
         lines.append("")
-        
+
         lines.append(" 🛡️ FILTERS:")
         lines.append(f" News Filter:   {'ON' if self.get_news_filter_enabled() else 'OFF'}")
         lines.append(f" MTF Filter:    {'ON' if self._get(KEY_SIGNALS, 'enable_mtf') else 'OFF'}")
@@ -523,7 +630,8 @@ class SettingsManager:
         if warns:
             lines.append("")
             lines.append(" ⚠️ WARNINGS:")
-            for w in warns: lines.append(f" {w}")
+            for w in warns:
+                lines.append(f" {w}")
 
         lines.append("=" * 60)
         return "\n".join(lines)
@@ -532,15 +640,15 @@ class SettingsManager:
         risk_pct = self.get_risk_per_trade()
         max_risk = self.get_max_total_risk()
         max_pos = self.get_max_positions()
-        
+
         risk_usd = balance * (risk_pct / 100.0)
         max_total_usd = balance * (max_risk / 100.0)
-        
+
         max_dd_usd = min(risk_usd * max_pos, max_total_usd)
         max_dd_pct = (max_dd_usd / balance * 100.0) if balance > 0 else 0
-        
+
         emoji, status, warns = self.get_health_status()
-        
+
         return {
             'health_emoji': emoji,
             'health_status': status,

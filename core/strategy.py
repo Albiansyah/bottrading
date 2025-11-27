@@ -27,6 +27,14 @@ class TradingStrategy:
         ind = self.settings['indicators']
         sig = self.settings['signal_requirements']
         
+        # Trading Style: SCALPING / SWING / AUTO
+        # Ini mengontrol cara engine memilih mode & threshold,
+        # tapi di dalamnya tetap AUTO (bisa SNIPER/TREND/BREAKOUT)
+        try:
+            self.trading_style = self.sm.get_trading_style().upper()
+        except Exception:
+            self.trading_style = 'SCALPING'
+
         self.settings.setdefault('debug', {})
         self.debug_config = self.settings['debug']
         self.log_mtf = self.debug_config.get('log_mtf_filter', False)
@@ -57,6 +65,7 @@ class TradingStrategy:
         
         self.cp = CandlePattern() 
         
+        # Default MTF config akan disesuaikan lagi oleh style profile
         self.htf_timeframe = sig.get('higher_timeframe', 'H1') 
         self.enable_mtf = sig.get('enable_mtf', True)
         self.ma_htf = MovingAverage(period=50) 
@@ -65,13 +74,14 @@ class TradingStrategy:
         self.scoring_config = sig.get('scoring', {})
         self.strategy_mode_override = sig.get('strategy_mode_override', 'AUTO').upper()
 
-        self._base_min_conf_sniper = float(sig.get('min_conf_sniper', 2.0))
-        self._base_min_conf_trend  = float(sig.get('min_conf_trend', 1.5))
-        self._base_min_conf_pullback = float(sig.get('min_conf_pullback', 2.0)) 
-        self._base_min_conf_breakout = float(sig.get('min_conf_breakout', 1.0))
+        self._base_min_conf_sniper = float(sig.get('min_conf_sniper', 0.5))
+        self._base_min_conf_trend  = float(sig.get('min_conf_trend', 0.5))
+        self._base_min_conf_pullback = float(sig.get('min_conf_pullback', 0.5)) 
+        self._base_min_conf_breakout = float(sig.get('min_conf_breakout', 0.5))
         
         self.min_exit_score = float(sig.get('min_exit_score', 2.0))
 
+        # Nilai ini akan di-tune ulang oleh style profile (SCALPING / SWING)
         self.min_conf_sniper = self._base_min_conf_sniper
         self.min_conf_trend  = self._base_min_conf_trend
         self.min_conf_pullback = self._base_min_conf_pullback
@@ -80,12 +90,59 @@ class TradingStrategy:
         self.current_regime = "UNKNOWN"
         self.regime_details = {} 
 
+        # Terapkan profil awal berdasarkan trading_style
+        self._apply_style_profile(self.trading_style) 
+
         self.ai_analyzer = None
         if sig.get('use_ai', False) and AIAnalyzer is not None:
             try:
                 self.ai_analyzer = AIAnalyzer(self.settings)
             except Exception:
                 self.ai_analyzer = None
+
+    def _apply_style_profile(self, style: str):
+        """
+        Sesuaikan parameter strategi berdasarkan trading_style:
+        - SCALPING : fokus M5, entry cepat, gunakan HTF H1 sebagai kompas
+        - SWING    : fokus H1/H4, lebih strict, gunakan HTF H4 sebagai kompas
+        - AUTO     : gunakan setting bawaan dari file config
+        """
+        style = (style or 'SCALPING').upper()
+        self.trading_style = style
+
+        # Default: gunakan nilai base dari config
+        self.min_conf_sniper = self._base_min_conf_sniper
+        self.min_conf_trend = self._base_min_conf_trend
+        self.min_conf_pullback = self._base_min_conf_pullback
+        self.min_conf_breakout = self._base_min_conf_breakout
+
+        if style == 'SCALPING':
+            # Entry di TF cepat (umumnya M5), gunakan HTF = H1 sebagai kompas trend
+            self.htf_timeframe = 'H1'
+            self.enable_mtf = True
+
+            # Buat sedikit lebih mudah untuk tembak signal sniper,
+            # tapi tetap menjaga trend/breakout tidak terlalu liar
+            self.min_conf_sniper = max(0.5, self._base_min_conf_sniper - 0.5)
+            self.min_conf_trend = self._base_min_conf_trend
+            self.min_conf_pullback = self._base_min_conf_pullback
+            self.min_conf_breakout = max(0.5, self._base_min_conf_breakout - 0.2)
+
+        elif style == 'SWING':
+            # Entry di TF besar (H1/H4), gunakan HTF lebih besar lagi (H4)
+            self.htf_timeframe = 'H4'
+            self.enable_mtf = True
+
+            # Untuk swing, kita ingin konfirmasi lebih kuat
+            self.min_conf_sniper = self._base_min_conf_sniper + 0.5
+            self.min_conf_trend = max(1.0, self._base_min_conf_trend)
+            self.min_conf_pullback = self._base_min_conf_pullback + 0.5
+            self.min_conf_breakout = self._base_min_conf_breakout + 0.5
+
+        else:
+            # AUTO: gunakan setting file seadanya
+            self.htf_timeframe = self.signal_config.get('higher_timeframe', 'H1')
+            self.enable_mtf = self.signal_config.get('enable_mtf', True)
 
     def analyze(self, df_main: pd.DataFrame, session: str, df_htf: pd.DataFrame = None, is_backtest: bool = False):
         if df_main is None or len(df_main) < 205:
@@ -95,14 +152,38 @@ class TradingStrategy:
         
         # --- 1. MODE SELECTION ---
         if manual_mode != "AUTO":
-             mode = manual_mode
+            mode = manual_mode
         else:
-             regime = self.current_regime
-             if regime == "TRENDING": mode = "TREND_ONLY"
-             elif regime == "RANGING": mode = "SNIPER_ONLY"
-             elif regime == "BREAKOUT": mode = "TREND_ONLY"
-             elif regime == "VOLATILE": mode = "SNIPER_ONLY"
-             else: mode = "SNIPER_ONLY"
+            regime = self.current_regime
+            # Mapping regime -> mode disesuaikan dengan trading_style,
+            # tapi tetap fleksibel (engine bisa SNIPER/TREND/BREAKOUT)
+            if self.trading_style == 'SCALPING':
+                if regime in ["RANGING", "VOLATILE"]:
+                    mode = "SNIPER_ONLY"
+                elif regime in ["TRENDING", "BREAKOUT"]:
+                    mode = "TREND_ONLY"
+                else:
+                    mode = "SNIPER_ONLY"
+            elif self.trading_style == "SWING":
+                # Swing: fokus tren besar, gunakan TREND/PULLBACK sebagai default
+                if regime in ["TRENDING", "BREAKOUT"]:
+                    mode = "TREND_ONLY"
+                elif regime == "RANGING":
+                    mode = "SNIPER_ONLY"
+                else:
+                    mode = "TREND_ONLY"
+            else:
+                # Default AUTO behaviour lama
+                if regime == "TRENDING":
+                    mode = "TREND_ONLY"
+                elif regime == "RANGING":
+                    mode = "SNIPER_ONLY"
+                elif regime == "BREAKOUT":
+                    mode = "TREND_ONLY"
+                elif regime == "VOLATILE":
+                    mode = "SNIPER_ONLY"
+                else:
+                    mode = "SNIPER_ONLY"
 
         sigs = {}
         sc = self.signal_config
@@ -120,8 +201,10 @@ class TradingStrategy:
         
         ma_trend = "NEUTRAL"
         if ema200_val:
-            if current_price > ema200_val: ma_trend = "BULLISH"
-            elif current_price < ema200_val: ma_trend = "BEARISH"
+            if current_price > ema200_val:
+                ma_trend = "BULLISH"
+            elif current_price < ema200_val:
+                ma_trend = "BEARISH"
         
         sigs['main_trend'] = ma_trend 
 
@@ -142,8 +225,10 @@ class TradingStrategy:
             htf_trend = "NEUTRAL"
             if htf_ma_val:
                 htf_price = df_htf['close'].iloc[-1]
-                if htf_price > htf_ma_val: htf_trend = "BULLISH"
-                elif htf_price < htf_ma_val: htf_trend = "BEARISH"
+                if htf_price > htf_ma_val:
+                    htf_trend = "BULLISH"
+                elif htf_price < htf_ma_val:
+                    htf_trend = "BEARISH"
             
             htf_atr = self.atr.calculate(df_htf) or 0.0
             htf_pattern_result = self.cp.analyze(df_htf, atr=htf_atr, current_trend=htf_trend)
@@ -170,32 +255,41 @@ class TradingStrategy:
             total_score = s.get('trend_ma_score', 1.5) + s.get('trend_macd_score', 1.0)
 
         elif mode == "PULLBACK_ONLY":
-            if sc.get('use_ma', True): sigs['ma_long'] = self.ma_long.get_signal(df_main) 
-            if sc.get('use_rsi', True): sigs['rsi'] = self.rsi.get_signal(df_main)
-            if sc.get('use_stoch', True): sigs['stoch'] = self.stoch.get_signal(df_main)
+            if sc.get('use_ma', True):
+                sigs['ma_long'] = self.ma_long.get_signal(df_main) 
+            if sc.get('use_rsi', True):
+                sigs['rsi'] = self.rsi.get_signal(df_main)
+            if sc.get('use_stoch', True):
+                sigs['stoch'] = self.stoch.get_signal(df_main)
             min_conf_needed = self.min_conf_pullback
-            total_score = s.get('pullback_trend_score', 1.5) + s.get('pullback_rsi_score', 1.0) + s.get('pullback_stoch_score', 1.0)
+            total_score = s.get('pullback_trend_score', 1.5) + s.get('pullback_rsi_score', 1.0)
         
         elif mode == "BREAKOUT_ONLY":
             sigs['regime'] = self.current_regime
             sigs['details'] = self.regime_details
             min_conf_needed = self.min_conf_breakout
             total_score = s.get('breakout_signal_score', 1.5) + s.get('breakout_confirm_score', 1.0)
+        
         else: 
-             return "NEUTRAL", 0.0, {}
+            return "NEUTRAL", 0.0, {}
 
         # --- 3. SCORING ---
         buy_score, sell_score = self._calculate_signal_scores(df_main, sigs, mode, df_htf)
 
-        if total_score <= 0: total_score = 1
+        if total_score <= 0:
+            total_score = 1
 
         signal_type = None
         confidence = 0.0
         
-        if mode in ["SNIPER_ONLY", "SNIPER"]: min_conf_needed = self.min_conf_sniper
-        elif mode in ["TREND_ONLY", "TREND"]: min_conf_needed = self.min_conf_trend
-        elif mode == "PULLBACK_ONLY": min_conf_needed = self.min_conf_pullback
-        elif mode == "BREAKOUT_ONLY": min_conf_needed = self.min_conf_breakout
+        if mode in ["SNIPER_ONLY", "SNIPER"]:
+            min_conf_needed = self.min_conf_sniper
+        elif mode in ["TREND_ONLY", "TREND"]:
+            min_conf_needed = self.min_conf_trend
+        elif mode == "PULLBACK_ONLY":
+            min_conf_needed = self.min_conf_pullback
+        elif mode == "BREAKOUT_ONLY":
+            min_conf_needed = self.min_conf_breakout
 
         if buy_score >= min_conf_needed and buy_score > sell_score:
             signal_type = "BUY"
@@ -219,17 +313,24 @@ class TradingStrategy:
         return signal_type, confidence, details
 
     def _get_htf_trend(self, df_htf: pd.DataFrame) -> str:
-        if df_htf is None or len(df_htf) < 50: return "NEUTRAL"
+        """Get trend dari Higher Time Frame"""
+        if df_htf is None or len(df_htf) < 50:
+            return "NEUTRAL"
         try:
             htf_ma_value = self.ma_htf.calculate(df_htf)
-            if htf_ma_value is None: return "NEUTRAL"
+            if htf_ma_value is None:
+                return "NEUTRAL"
             current_price = df_htf['close'].iloc[-1]
-            if current_price > htf_ma_value: return "BULLISH"
-            elif current_price < htf_ma_value: return "BEARISH"
+            if current_price > htf_ma_value:
+                return "BULLISH"
+            elif current_price < htf_ma_value:
+                return "BEARISH"
             return "NEUTRAL"
-        except Exception: return "NEUTRAL"
+        except Exception:
+            return "NEUTRAL"
 
     def _calculate_signal_scores(self, df_main: pd.DataFrame, signals: dict, strategy_mode: str, df_htf: pd.DataFrame):
+        """Calculate BUY/SELL scores berdasarkan indicators"""
         buy, sell = 0.0, 0.0
         s = self.scoring_config
 
@@ -242,13 +343,17 @@ class TradingStrategy:
         strength_mult = 1.5 if pat_strength == 'HIGH' else 1.0
         pattern_bonus = pat_score * 0.5 * strength_mult
 
-        if pattern_bonus > 0: buy += pattern_bonus
-        elif pattern_bonus < 0: sell += abs(pattern_bonus)
+        if pattern_bonus > 0:
+            buy += pattern_bonus
+        elif pattern_bonus < 0:
+            sell += abs(pattern_bonus)
 
         htf_pat = signals.get('htf_pattern', {})
         htf_score = htf_pat.get('score', 0)
-        if htf_score > 0: buy += 2.0 
-        elif htf_score < 0: sell += 2.0
+        if htf_score > 0:
+            buy += 2.0 
+        elif htf_score < 0:
+            sell += 2.0
 
         if (pat_score > 0 and htf_score < 0) or (pat_score < 0 and htf_score > 0):
             buy *= 0.5
@@ -265,9 +370,12 @@ class TradingStrategy:
 
         if fib_zone == "IN_GOLDEN_ZONE":
             confluence = False
-            if pat_score != 0: confluence = True
-            elif signals.get('stoch') in ['BUY', 'SELL']: confluence = True
-            elif signals.get('rsi') in ['BUY', 'SELL', 'OVERSOLD', 'OVERBOUGHT']: confluence = True
+            if pat_score != 0:
+                confluence = True
+            elif signals.get('stoch') in ['BUY', 'SELL']:
+                confluence = True
+            elif signals.get('rsi') in ['BUY', 'SELL', 'OVERSOLD', 'OVERBOUGHT']:
+                confluence = True
             
             if confluence:
                 if fib_trend == "UP":
@@ -299,50 +407,64 @@ class TradingStrategy:
             stoch_sig = signals.get('stoch')
             
             oversold_count = 0
-            if rsi_sig in ['OVERSOLD', 'BUY']: oversold_count += 1
-            if bb_sig == 'OVERSOLD': oversold_count += 1
-            if stoch_sig in ['OVERSOLD', 'BUY']: oversold_count += 1
+            if rsi_sig in ['OVERSOLD', 'BUY']:
+                oversold_count += 1
+            if bb_sig == 'OVERSOLD':
+                oversold_count += 1
+            if stoch_sig in ['OVERSOLD', 'BUY']:
+                oversold_count += 1
             
             overbought_count = 0
-            if rsi_sig in ['OVERBOUGHT', 'SELL']: overbought_count += 1
-            if bb_sig == 'OVERBOUGHT': overbought_count += 1
-            if stoch_sig in ['OVERBOUGHT', 'SELL']: overbought_count += 1
+            if rsi_sig in ['OVERBOUGHT', 'SELL']:
+                overbought_count += 1
+            if bb_sig == 'OVERBOUGHT':
+                overbought_count += 1
+            if stoch_sig in ['OVERBOUGHT', 'SELL']:
+                overbought_count += 1
 
             if oversold_count >= 1:
                 # Filter Panic Candle without Reversal
                 if is_panic_candle and not is_bullish_reversal:
-                    pass # Skip (Falling Knife)
+                    pass  # Skip (Falling Knife)
                 else:
                     buy += s.get('sniper_setup_score', 1.5) * (oversold_count / 2.0)
                     buy += s.get('sniper_confirm_score', 1.0)
 
             if overbought_count >= 1:
                 if is_panic_candle and not is_bearish_reversal:
-                    pass # Skip (Rocket Launch)
+                    pass  # Skip (Rocket Launch)
                 else:
                     sell += s.get('sniper_setup_score', 1.5) * (overbought_count / 2.0)
                     sell += s.get('sniper_confirm_score', 1.0)
         
         elif strategy_mode in ["TREND_ONLY", "TREND"]:
-            if signals.get('ma') in ['BUY', 'BULLISH', 'BULLISH_CROSS']: buy += s.get('trend_ma_score', 1.5)
-            if signals.get('ma') in ['SELL', 'BEARISH', 'BEARISH_CROSS']: sell += s.get('trend_ma_score', 1.5)
+            if signals.get('ma') in ['BUY', 'BULLISH', 'BULLISH_CROSS']:
+                buy += s.get('trend_ma_score', 1.5)
+            if signals.get('ma') in ['SELL', 'BEARISH', 'BEARISH_CROSS']:
+                sell += s.get('trend_ma_score', 1.5)
 
-            if signals.get('macd') in ['BUY', 'BULLISH', 'BULLISH_CROSS']: buy += s.get('trend_macd_score', 1.0)
-            if signals.get('macd') in ['SELL', 'BEARISH', 'BEARISH_CROSS']: sell += s.get('trend_macd_score', 1.0)
+            if signals.get('macd') in ['BUY', 'BULLISH', 'BULLISH_CROSS']:
+                buy += s.get('trend_macd_score', 1.0)
+            if signals.get('macd') in ['SELL', 'BEARISH', 'BEARISH_CROSS']:
+                sell += s.get('trend_macd_score', 1.0)
 
             direction = self.regime_details.get('direction', 'NEUTRAL')
-            if direction == 'BULLISH': buy += 1.0 
-            elif direction == 'BEARISH': sell += 1.0
+            if direction == 'BULLISH':
+                buy += 1.0 
+            elif direction == 'BEARISH':
+                sell += 1.0
 
         elif strategy_mode == "PULLBACK_ONLY":
             main_trend = signals.get('ma_long')
             rsi_sig = signals.get('rsi')
             if main_trend in ['BUY', 'BULLISH']:
                 buy += s.get('pullback_trend_score', 1.5)
-                if rsi_sig in ['BUY', 'OVERSOLD']: buy += s.get('pullback_rsi_score', 1.0)
+                if rsi_sig in ['BUY', 'OVERSOLD']:
+                    buy += s.get('pullback_rsi_score', 1.0)
             elif main_trend in ['SELL', 'BEARISH']:
                 sell += s.get('pullback_trend_score', 1.5)
-                if rsi_sig in ['SELL', 'OVERBOUGHT']: sell += s.get('pullback_rsi_score', 1.0)
+                if rsi_sig in ['SELL', 'OVERBOUGHT']:
+                    sell += s.get('pullback_rsi_score', 1.0)
         
         elif strategy_mode == "BREAKOUT_ONLY":
             direction = signals.get('details', {}).get('direction', 'NEUTRAL')
@@ -357,21 +479,22 @@ class TradingStrategy:
             bonus = s.get('mtf_bonus_score', 2.0)
             
             # Bonus jika searah
-            if htf_trend == "BULLISH": buy += bonus
-            elif htf_trend == "BEARISH": sell += bonus
+            if htf_trend == "BULLISH":
+                buy += bonus
+            elif htf_trend == "BEARISH":
+                sell += bonus
             
             # VETO: Jangan lawan tren besar di mode Trend/Breakout
             if strategy_mode in ["TREND_ONLY", "BREAKOUT_ONLY"]:
                 if buy > 0 and htf_trend == "BEARISH":
-                    buy = 0 # Kill Signal
-                    # print("MTF VETO: BUY blocked by HTF Bearish Trend")
+                    buy = 0  # Kill Signal
                 if sell > 0 and htf_trend == "BULLISH":
-                    sell = 0 # Kill Signal
-                    # print("MTF VETO: SELL blocked by HTF Bullish Trend")
+                    sell = 0  # Kill Signal
 
         return buy, sell
 
     def update_dynamic_confidence(self, regime: str, details: dict):
+        """Update confidence thresholds berdasarkan market regime"""
         self.current_regime = regime
         self.regime_details = details 
         if regime == "VOLATILE":
@@ -388,7 +511,7 @@ class TradingStrategy:
 
     def should_close_position(self, position: dict, details: dict):
         """
-        [UPDATED] Emergency Exit Conditions
+        Emergency Exit Conditions
         Hanya close jika kondisi berbahaya (Trend Reversal / Fib Invalidation)
         """
         pos_type = position.get('type')
@@ -406,34 +529,39 @@ class TradingStrategy:
         if fib_levels:
             fib_zone = details.get('signals', {}).get('fib_zone')
             if pos_type == 'BUY' and fib_zone == 'BELOW_ZONE':
-                 return True, "Exit: Fib Setup Invalidated (Price < Swing Low)"
+                return True, "Exit: Fib Setup Invalidated (Price < Swing Low)"
             if pos_type == 'SELL' and fib_zone == 'ABOVE_ZONE':
-                 return True, "Exit: Fib Setup Invalidated (Price > Swing High)"
+                return True, "Exit: Fib Setup Invalidated (Price > Swing High)"
 
         return False, "Hold"
 
     def get_signal_summary(self, details: dict) -> str:
+        """Get summary text dari signal details"""
         sigs = details.get('signals', {})
         parts = []
         
         fib_zone = sigs.get('fib_zone', 'UNKNOWN')
-        if fib_zone != 'UNKNOWN': parts.append(f"FIB: {fib_zone}")
+        if fib_zone != 'UNKNOWN':
+            parts.append(f"FIB: {fib_zone}")
 
         if 'pattern' in sigs and sigs['pattern'].get('patterns'):
-             pats = ",".join(sigs['pattern']['patterns'])
-             parts.append(f"PAT: {pats}")
+            pats = ",".join(sigs['pattern']['patterns'])
+            parts.append(f"PAT: {pats}")
         
         parts.append(f"MODE: {details.get('strategy_mode', 'N/A')}")
         parts.append(f"TREND: {details.get('main_trend', 'N/A')}")
         return " | ".join(parts) if parts else "No clear signals"
 
     def validate_signal(self, signal_type: str, df, symbol_info: dict):
-        if len(df) < 200: return False, "Insufficient data for EMA200"
+        """Validate signal sebelum execute"""
+        if len(df) < 200:
+            return False, "Insufficient data for EMA200"
         
         current_price = df['close'].iloc[-1]
         ema200 = self.ema_trend.get_ema(df)
         
-        if not ema200: return True, "EMA not ready" 
+        if not ema200:
+            return True, "EMA not ready" 
         
         # EMA 200 Filter (Strict for Trend Mode)
         mode = self.sm.get_trading_mode()
